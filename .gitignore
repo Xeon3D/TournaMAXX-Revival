@@ -1,0 +1,7 @@
+__pycache__/
+/build/
+/dist/
+*.log
+modem-server-state*.json
+files/
+outgoing/

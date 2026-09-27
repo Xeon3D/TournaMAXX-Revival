@@ -2,7 +2,7 @@
 
 Worked out from `MERIT2\EXEC\MEGACDLL.EXE` of MAXX Emerald 2 V9.01 (PG3002,
 SHA-256 `1e490ccd…2b4c`), decompiled with Ghidra, and from calls the game
-made to `tools/modem-server.py`. Addresses are that executable's (LE object 1
+made to `modem-server.py`. Addresses are that executable's (LE object 1
 at 0x10000, fixups applied). Emerald V8.04 speaks the same protocol at
 version 7.
 
@@ -370,9 +370,9 @@ first, then read back. *Reading verified.*
 - **0x00E2**: the last 14 calls, 14 bytes each: u32 start, u32 end (time_t),
   u8 status, u8 error code, … *Verified.*
 
-## Running a server: `tools/modem-server.py`
+## Running a server: `modem-server.py`
 
-    python tools/modem-server.py --port 2323 --log modem-server.log --state modem-server-state.json
+    python modem-server.py --port 2323 --log modem-server.log --state modem-server-state.json
 
 Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
 2323 (Tools > Modem settings…). The state file holds the following; it can
