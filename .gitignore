@@ -5,3 +5,10 @@ __pycache__/
 modem-server-state*.json
 files/
 outgoing/
+panel/panel.json
+/panel.json
+state.json
+server.env
+packages/
+backups/
+.claude/

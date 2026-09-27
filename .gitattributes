@@ -1,2 +1,4 @@
 *.BAT -text
 *.bat -text
+*.sh text eol=lf
+deploy/* text eol=lf

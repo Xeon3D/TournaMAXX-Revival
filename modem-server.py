@@ -194,11 +194,99 @@ def reload_state_if_changed():
 
 
 def save_state():
+    """Written to a temporary file first and moved into place, so that a
+    reader (or a stop half way through) never sees half a file."""
     global STATE_MTIME
     with LOCK:
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(STATE, f, indent=1)
+        os.replace(tmp, STATE_PATH)
         STATE_MTIME = os.path.getmtime(STATE_PATH)
+
+
+# ------------------------------------------------------------ admin requests
+#
+# The control panel (panel/panel.py) changes the state through the running
+# server, so that its edits and the calls' take turns under LOCK instead of
+# overwriting each other in the file.  One JSON request per connection, on
+# 127.0.0.1 only (--admin-port):
+#   {"op": "get"}                                 the whole state
+#   {"op": "put", "path": [...], "value": v}      set a key or list index
+#   {"op": "delete", "path": [...]}               remove it
+#   {"op": "append", "path": [...], "value": v}   append to a list (made if missing)
+#   {"op": "remove", "path": [...], "match": v}   remove the first element equal to v
+#   {"op": "replace", "value": {...}}             the whole state
+# A path is keys and list indexes, e.g. ["outbox", "1234567"].  With the
+# server stopped, the panel applies the same function to the file itself.
+
+def apply_admin(state, req):
+    op = req.get("op")
+    if op == "get":
+        return state
+    if op == "replace":
+        if not isinstance(req.get("value"), dict):
+            raise ValueError("replace needs an object")
+        state.clear()
+        state.update(req["value"])
+        return True
+    path = req.get("path") or []
+    if not path:
+        raise ValueError("%s needs a path" % op)
+    node = state
+    for k in path[:-1]:
+        if isinstance(node, list):
+            node = node[int(k)]
+        else:
+            node = node.setdefault(k, {})
+    last = path[-1]
+    if isinstance(node, list):
+        last = int(last)
+    if op == "put":
+        node[last] = req.get("value")
+        return True
+    if op == "delete":
+        if isinstance(node, list):
+            del node[last]
+        else:
+            node.pop(last, None)
+        return True
+    if op == "append":
+        if isinstance(node, list):
+            target = node[last]
+        else:
+            target = node.setdefault(last, [])
+        target.append(req.get("value"))
+        return True
+    if op == "remove":
+        target = node[last] if isinstance(node, list) else node.get(last, [])
+        if req.get("match") in target:
+            target.remove(req.get("match"))
+            return True
+        return False
+    raise ValueError("unknown op %r" % op)
+
+
+def admin_client(sock):
+    try:
+        f = sock.makefile("rwb")
+        req = json.loads(f.readline().decode("utf-8"))
+        with LOCK:
+            reload_state_if_changed()
+            result = apply_admin(STATE, req)
+            if req.get("op") != "get":
+                save_state()
+                log("admin", "%s %s" % (req.get("op"), req.get("path", "")))
+            reply = json.dumps({"ok": True, "result": result})
+        f.write(reply.encode("utf-8") + b"\n")
+        f.flush()
+    except Exception as e:
+        try:
+            sock.sendall(json.dumps({"ok": False, "error": str(e)}).encode("utf-8") + b"\n")
+        except OSError:
+            pass
+    finally:
+        sock.close()
 
 
 def operator_page(lines):
@@ -1147,29 +1235,95 @@ class Session:
         self.sock.close()
 
 
+class DirectSession:
+    """A cabinet on a real network (Emerald 2 over Ethernet, or anything that
+    reaches the server's TCP ports without PPP): TournaMAXX straight over
+    the connection, port 15000 or 17751 as the cabinet chose."""
+
+    def __init__(self, sock, name, port):
+        self.sock = sock
+        self.name = name
+        self.port = port
+
+    def run(self):
+        try:
+            with LOCK:
+                app = TournaMaxx(self.name, self.port)
+                self.sock.sendall(app.opened())
+            while True:
+                data = self.sock.recv(4096)
+                if not data:
+                    break
+                with LOCK:
+                    reply = app.received(data)
+                if reply:
+                    self.sock.sendall(reply)
+        except OSError as e:
+            log(self.name, "connection error: %s" % e)
+        log(self.name, "call ended")
+        self.sock.close()
+
+
+CALLS = 0
+
+
+def next_call_name():
+    global CALLS
+    with LOCK:
+        CALLS += 1
+        return "call %d" % CALLS
+
+
+def listener(port, host="0.0.0.0"):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(8)
+    return srv
+
+
+def accept_loop(srv, start):
+    while True:
+        s, addr = srv.accept()
+        start(s, addr)
+
+
 def main():
     global LOG
     ap = argparse.ArgumentParser(description="TournaMAXX-Revival: a TournaMAXX server for Megatouch MAXX cabinets on an emulated modem.")
     ap.add_argument("--port", type=int, default=2323)
     ap.add_argument("--log", default="modem-server.log")
     ap.add_argument("--state", default="modem-server-state.json")
+    ap.add_argument("--tcp-ports", default="",
+                    help="also take TournaMAXX straight over TCP (no modem, no PPP) on these "
+                         "ports, e.g. 15000,17751")
+    ap.add_argument("--admin-port", type=int, default=0,
+                    help="take the control panel's requests on 127.0.0.1 at this port")
     a = ap.parse_args()
     LOG = open(a.log, "a", encoding="utf-8")
     load_state(a.state)
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", a.port))
-    srv.listen(4)
+    def modem_call(s, addr):
+        name = next_call_name()
+        log(name, "connected from %s:%d" % addr)
+        threading.Thread(target=Session(s, name).run, daemon=True).start()
+
+    srv = listener(a.port)
     log("server", "waiting for calls on port %d (log: %s)" % (a.port, a.log))
-    n = 0
+    for p in [int(x) for x in a.tcp_ports.replace(",", " ").split()]:
+        def direct_call(s, addr, p=p):
+            name = next_call_name()
+            log(name, "TournaMAXX over TCP on port %d from %s:%d" % ((p,) + addr))
+            threading.Thread(target=DirectSession(s, name, p).run, daemon=True).start()
+        threading.Thread(target=accept_loop, args=(listener(p), direct_call), daemon=True).start()
+        log("server", "and TournaMAXX over TCP on port %d" % p)
+    if a.admin_port:
+        admin = listener(a.admin_port, "127.0.0.1")
+        threading.Thread(target=accept_loop, daemon=True, args=(
+            admin, lambda s, addr: threading.Thread(target=admin_client, args=(s,), daemon=True).start())).start()
+        log("server", "control panel requests on 127.0.0.1:%d" % a.admin_port)
     try:
-        while True:
-            s, addr = srv.accept()
-            n += 1
-            name = "call %d" % n
-            log(name, "connected from %s:%d" % addr)
-            threading.Thread(target=Session(s, name).run, daemon=True).start()
+        accept_loop(srv, modem_call)
     except KeyboardInterrupt:
         log("server", "stopped")
 

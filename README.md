@@ -34,6 +34,45 @@ It can be edited while the server runs; each call reads it again. The
 protocol, the state file and the outbox are described in
 [docs/tournamaxx.md](docs/tournamaxx.md).
 
+Two more options: `--tcp-ports 15000,17751` also takes TournaMAXX straight
+over TCP, for cabinets that reach the server on a real network (whose
+`us.accessmerit.com` points at it) instead of through a modem; and
+`--admin-port 2324` takes the control panel's requests on 127.0.0.1.
+
+## The control panel: `panel/`
+
+A web page to run the server: start, stop and restart it, follow its log,
+and manage everything in the state file -- tournaments (and their
+standings), cabinets (location, operator settings, prices, dial-up
+settings, messages, file transfers, reboots, counters, the reports they
+send), players, and update packages (upload a `NETUPDT.EXE`, or a .zip laid
+out as `C:\` that it builds with `mkupdate.py`). Python 3 again, nothing
+else. While the server runs, its edits go through the admin port, so they
+and the calls take turns.
+
+To try it on your own machine (it runs the server itself):
+
+    python panel/panel.py --config panel.json --set-password admin
+    python panel/panel.py --config panel.json
+
+then open http://127.0.0.1:8080/. The config (made on first run) sets the
+ports; see the top of `panel/panel.py`.
+
+## On a server: `deploy/`
+
+`deploy/install.sh` sets it all up on Debian or Ubuntu, as root, from a copy
+of this repository: the server and the panel as systemd services under
+their own user, nginx in front of the panel with a Let's Encrypt
+certificate, log rotation, and a sudo rule that lets the panel start and
+stop the server (and nothing else):
+
+    sudo sh deploy/install.sh --domain us.accessmerit.com --email you@example.com
+
+It asks for the panel's admin password. Run it again to update; the data in
+`/var/lib/tournamaxx` stays. The machine needs TCP 80 and 443 (the panel),
+2323 (the emulators' modem calls) and, for direct connections, 15000 and
+17751.
+
 ## Update packages: `mkupdate.py`
 
 Makes a `NETUPDT.EXE` the way Merit shipped network updates: a PKZIP 2.04g
@@ -64,6 +103,8 @@ No game files are included here: the fix is made from your own copy.
 | Path | What |
 |---|---|
 | `modem-server.py` | the server (Python 3, standard library only) |
+| `panel/` | the web control panel (`panel.py` and its page) |
+| `deploy/` | `install.sh`, the systemd units, nginx and logrotate config |
 | `mkupdate.py`, `mkupdate.spec` | the update-package maker and its PyInstaller spec |
 | `datefix/` | the tournament date fix: `tmfix.py` (needs `capstone`), its LE loader `lefile.py`, Emerald V8.04's installer `NETUPDT-V804.BAT` |
 | `tools/dbfcrypt.py` | reads the cabinet's encrypted `D:\Database\*.dbf` files |

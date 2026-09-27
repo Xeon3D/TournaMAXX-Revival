@@ -1,0 +1,21 @@
+[Unit]
+Description=TournaMAXX-Revival control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tournamaxx
+Group=tournamaxx
+WorkingDirectory=/var/lib/tournamaxx
+ExecStart=/usr/bin/python3 /opt/tournamaxx/panel/panel.py --config /var/lib/tournamaxx/panel.json
+Restart=on-failure
+RestartSec=3
+
+# No NoNewPrivileges: the panel starts and stops the server through sudo
+# (/etc/sudoers.d/tournamaxx allows only that).
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

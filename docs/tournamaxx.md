@@ -439,7 +439,12 @@ first, then read back. *Reading verified.*
 
 In MegaPPBox: *Tools > Modem on COM2*, then *Tools > Modem settings…*: "Dial
 out to a TCP/IP host", 127.0.0.1, port 2323. Several cabinets can call at
-once; their messages are handled one at a time. The state file (created with
+once; their messages are handled one at a time. With `--tcp-ports 15000,17751` it also
+takes TournaMAXX straight over TCP on those ports (no modem, no PPP), and
+with `--admin-port N` it takes requests from the control panel
+(`panel/panel.py`) on 127.0.0.1: one JSON object per connection, `get`,
+`put`, `delete`, `append`, `remove` or `replace` (see `apply_admin`), done
+under the server's lock so that they never cross a call's own changes. The state file (created with
 a test tournament if missing) holds the following. It can be edited while the
 server runs: each call reads it again if it changed (an edit that does not
 parse is ignored until it does).

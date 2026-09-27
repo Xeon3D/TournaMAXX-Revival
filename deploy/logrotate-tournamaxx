@@ -1,0 +1,13 @@
+# The server logs every PPP frame, so its log grows quickly.  copytruncate:
+# the server keeps the file open.
+/var/lib/tournamaxx/modem-server.log {
+    su tournamaxx tournamaxx
+    weekly
+    maxsize 200M
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
