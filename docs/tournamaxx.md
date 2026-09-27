@@ -66,7 +66,7 @@ handler and answers with the next number up. The dispatcher (switch at
 | 0x0211 | 0xa0d9c | 0x0212 | per-game settings: read, or set then read. *Verified (read).* |
 | 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read. *Verified (read).* |
 | 0x0A01 | 0xa2c20 | none | the ISP login and password |
-| 0x0A11 | 0xa2c6c | none | operator message, up to 1500 bytes of text, written to `D:\Database\Operate.txt` |
+| 0x0A11 | 0xa2c6c | none | the site's registration page, shown during Initial Connection. *Verified.* |
 | 0xFF01 | | 0xFF02 (empty) | status line; `COMPLETE.` ends the session. *Verified.* |
 | 0xFF11 | 0x9d2c8 | 0xFF02 | acknowledgment only |
 
@@ -214,6 +214,15 @@ Written into `C:\NTNVRAM.DAT`, which SETUP.DLL's LOCATION INFO screen reads
     +77 char   COUNTRY[51]
     +AA char   TELEPHONE #[51]
 
+### 0x0A11 registration page (server, no answer). *Verified.*
+
+The cabinet writes 1500 bytes of the body to `D:\Database\Operate.txt`.
+SETUP.DLL (0x19d24) reads it as up to 15 lines of 100 bytes, stopping at the
+first empty one, and after an Initial Connection shows them under "IS THE
+FOLLOWING INFORMATION CORRECT?" with YES / NO: the registration Merit holds
+for the site, for the operator to confirm. Send it on port 15000, before
+COMPLETE.
+
 ### 0x0121 delete / reboot (server)
 
     +04 u8    reboot at the end of the call ("TournaMAXX Server: Reboot
@@ -277,6 +286,28 @@ first, then read back. *Reading verified.*
   counters. The cabinet clears these once sent.
 - **0x00E2**: the last 14 calls, 14 bytes each: u32 start, u32 end (time_t),
   u8 status, u8 error code, … *Verified.*
+
+## Running a server: `tools/modem-server.py`
+
+    python tools/modem-server.py --port 2323 --log modem-server.log --state modem-server-state.json
+
+Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
+2323 (Tools > Modem settings…). The state file holds:
+
+- `tournaments`: id, game, start/end (Unix times), credits, name, desc,
+  randseed, seedinc, groups, prizes, showdate, final_days. The status is
+  worked out from the clock.
+- `players`, `scores`: what the cabinets have sent.
+- `locations` → machine serial: name, city_state, country, telephone: the
+  LOCATION INFO screen, and the registration page of Initial Connection.
+- `outbox` → machine serial: done at that cabinet's next update call, then
+  moved to `outbox_done`:
+  - `{"do": "message", "text": "line\nline"}`: a registration page
+  - `{"do": "send_file", "from": "local path", "to": "C:\\PATH"}`
+  - `{"do": "fetch_file", "path": "C:\\PATH"}`: saved under `files\<serial>\`
+  - `{"do": "delete", "path": "C:\\PATH", "reboot": false}`
+- `reports` → machine serial: the settings, statistics and call history
+  each update call reads.
 
 ## The cabinet's databases (dBase III, `D:\Database\`)
 

@@ -31,6 +31,7 @@ import datetime
 import socket
 import struct
 import sys
+import os
 import threading
 import time
 import json
@@ -164,6 +165,15 @@ def save_state():
             json.dump(STATE, f, indent=1)
 
 
+def operator_page(lines):
+    """0x0A11's body: the cabinet writes 1500 bytes of it to
+    D:\\Database\\Operate.txt, which SETUP.DLL (0x19d24) reads as up to 15
+    lines of 100 bytes, stopping at the first empty one, and shows during
+    Initial Connection above "IS THE FOLLOWING INFORMATION CORRECT?"."""
+    body = b"".join(cstr(l, 100) for l in lines if l)[:1400]
+    return body + b"\0" * (1500 - len(body))
+
+
 def tournament_status(t, now=None):
     """What a tournament is, by the clock (MEGACDLL 0xa419c): 1 announced,
     2 running, 4 final (winners shown for final_days after END), 5 to be
@@ -225,6 +235,10 @@ class TournaMaxx:
         self.rank_msgs = 0
         self.reports = None
         self.asked = 0
+        self.box_item = None
+        self.box_data = b""
+        self.box_pos = 0
+        self.box_done = False
 
     @staticmethod
     def msg(t, body=b""):
@@ -351,8 +365,8 @@ class TournaMaxx:
                 break
             m, self.buf = self.buf[:n], self.buf[n:]
             body = m[4:]
-            txt = "".join(chr(x) if 32 <= x < 127 else "." for x in body)
-            log(self.name, "  TournaMAXX: <- %04X, %d bytes: %s" % (t, n, body.hex(" ")))
+            txt = "".join(chr(x) if 32 <= x < 127 else "." for x in body[:96])
+            log(self.name, "  TournaMAXX: <- %04X, %d bytes: %s" % (t, n, hexs(body, 96)))
             log(self.name, "              as text: %s" % txt)
 
             # The update call: tournaments out, then what the cabinet holds,
@@ -360,6 +374,13 @@ class TournaMaxx:
             if t == 0x0012:
                 self.serial = ctext(body[2:16])   # the machine serial
             if t == 0x0012 and self.port != 17751:
+                # Initial Connection: the registration Merit holds for the
+                # site, which SETUP.DLL shows with "IS THE FOLLOWING
+                # INFORMATION CORRECT?", then COMPLETE.
+                loc = STATE.setdefault("locations", {}).get(self.serial, {})
+                lines = [loc.get("name", ""), loc.get("city_state", ""), loc.get("country", ""),
+                         loc.get("telephone", ""), "MACHINE SERIAL %s" % self.serial]
+                out += self.say(0x0A11, operator_page(lines), "registration page")
                 out += self.say(0xFF01, b"COMPLETE.\0", "COMPLETE.")
             elif t == 0x0012:
                 # Announced and running tournaments go out first.
@@ -372,7 +393,9 @@ class TournaMaxx:
             elif t == 0x0022 and self.pending:
                 out += self.next_tournament()
             elif t == 0x0022 and self.reports is not None:
-                out += self.next_report()        # the closing 0x0021s are done
+                out += self.run_outbox()         # the closing 0x0021s are done
+            elif self.box_item and t in (0x0102, 0x0104, 0x0113, 0x0114, 0x0122):
+                out += self.outbox_answer(t, body)
             elif t == 0x0022:
                 out += self.say(0x0041, what="which tournaments?")
             elif t == 0x0042:
@@ -388,14 +411,14 @@ class TournaMaxx:
                 self.store_scores(body)
                 out += self.say(0x0067, what="more scores?")
             elif t == 0x0068:
-                # Scores are in: send the standings (each 0x0073 answered by
-                # an empty 0x0074), then COMPLETE.
-                ranks, self.rank_msgs = self.rankings()
+                # Scores are in.  Players from other cabinets first (their
+                # handles are what the rankings show), then the standings
+                # (each 0x0073 answered by an empty 0x0074).
                 self.reports = list(REPORTS)
-                if ranks:
-                    out += ranks
-                else:
-                    out += self.after_rankings()
+                others = self.other_players()
+                out += others if others else self.send_rankings()
+            elif t == 0x0082:
+                out += self.send_rankings()
             elif t == 0x0074:
                 self.rank_msgs -= 1
                 if self.rank_msgs <= 0:
@@ -424,14 +447,137 @@ class TournaMaxx:
             cstr(loc.get(k, ""), 51) for k in ("name", "city_state", "country", "telephone"))
         return self.say(0x00B1, body, "location %r" % loc.get("name"))
 
+    def send_rankings(self):
+        ranks, self.rank_msgs = self.rankings()
+        return ranks if ranks else self.after_rankings()
+
+    def other_players(self):
+        """0x0081: players registered at other cabinets that this one has not
+        been sent yet, so their handles, cities and states show in its
+        rankings.  Entries of 97 bytes (MEGACDLL 0x9e6bc): u32 ID, then the
+        player's record as their own cabinet sent it (from +4: u32, HANDLE,
+        PIN, CITY, STATE), u32 LOCATION.  The cabinet answers 0x0082."""
+        sent = STATE.setdefault("players_sent", {}).setdefault(self.serial, [])
+        todo = [(pid, p) for pid, p in STATE["players"].items()
+                if p.get("cabinet") != self.serial and pid not in sent]
+        if not todo:
+            return b""
+        todo = todo[:20]                      # 20 × 97 bytes fit a message
+        body = b""
+        for pid, p in todo:
+            raw = bytes.fromhex(p["raw"])
+            body += struct.pack("<I", int(pid)) + raw[4:0x5D] + struct.pack("<I", 0)
+            sent.append(pid)
+        save_state()
+        return self.say(0x0081, body, "%d players from other cabinets" % len(todo))
+
     def after_rankings(self):
         """The location, finals and removals (each 0x0021 answered by
-        0x0022), then the reports."""
+        0x0022), the outbox, then the reports."""
         out = self.location()
         self.pending = self.closing()
         if self.pending:
             return out + self.next_tournament()
+        return out + self.run_outbox()
+
+    # ------------------------------------------------------------ the outbox
+    #
+    # What the operator has queued for a cabinet, in the state file under
+    # "outbox" -> machine serial, done at its next update call:
+    #   {"do": "message", "text": "..."}                 0x0A11
+    #   {"do": "send_file", "from": "local", "to": "C:\\PATH"}   0x0111/0x0112
+    #   {"do": "fetch_file", "path": "C:\\PATH"}          0x0101/0x0103, saved
+    #                                                  under files\<serial>\
+    #   {"do": "delete", "path": "C:\\PATH", "reboot": false}    0x0121
+    # Done items move to "outbox_done".
+
+    CHUNK = 1024
+
+    def run_outbox(self):
+        box = STATE.setdefault("outbox", {}).setdefault(self.serial, [])
+        out = b""
+        while box:
+            item = box[0]
+            what = item.get("do")
+            if what == "message":
+                out += self.say(0x0A11, operator_page(item.get("text", "").split("\n")),
+                                "operator page")
+                self.finish_item("sent")
+                continue
+            self.box_item = item
+            if what == "delete":
+                body = bytes([1 if item.get("reboot") else 0]) + item.get("path", "").encode("latin1") + b"\0"
+                return out + self.say(0x0121, body, "delete %r, reboot %s" % (item.get("path"), bool(item.get("reboot"))))
+            if what == "send_file":
+                try:
+                    with open(item["from"], "rb") as f:
+                        self.box_data = f.read()
+                except OSError as e:
+                    self.box_item = None
+                    self.finish_item("cannot read %s: %s" % (item.get("from"), e))
+                    continue
+                self.box_pos = 0
+                self.box_done = False
+                body = b"\0" + item["to"].encode("latin1") + b"\0"
+                return out + self.say(0x0111, body, "send %s -> %s (%d bytes)" %
+                                      (item["from"], item["to"], len(self.box_data)))
+            if what == "fetch_file":
+                self.box_data = b""
+                body = b"\0" + item["path"].encode("latin1") + b"\0"
+                return out + self.say(0x0101, body, "fetch %s" % item["path"])
+            self.box_item = None
+            self.finish_item("unknown")
         return out + self.next_report()
+
+    def finish_item(self, result):
+        box = STATE["outbox"][self.serial]
+        item = box.pop(0)
+        item["result"] = result
+        item["at"] = int(time.time())
+        STATE.setdefault("outbox_done", {}).setdefault(self.serial, []).append(item)
+        save_state()
+        log(self.name, "  outbox: %s: %s" % (item.get("do"), result))
+
+    def outbox_answer(self, t, body):
+        item = self.box_item
+        what = item.get("do")
+        if what == "delete":
+            self.box_item = None
+            self.finish_item("done")
+        elif what == "send_file":
+            if t == 0x0114:
+                self.box_item = None
+                self.finish_item("refused by the cabinet")
+            elif self.box_done:
+                self.box_item = None
+                self.finish_item("sent")
+            else:
+                # 0x0112: +04 offset, +08 file size, +0C bytes here, +10 data;
+                # a chunk of 0 bytes ends the file.
+                chunk = self.box_data[self.box_pos:self.box_pos + self.CHUNK]
+                body = struct.pack("<III", self.box_pos, len(self.box_data), len(chunk)) + chunk
+                self.box_pos += len(chunk)
+                if not chunk:
+                    self.box_done = True
+                return self.say(0x0112, body, "%d/%d" % (self.box_pos, len(self.box_data)))
+        elif what == "fetch_file":
+            if t == 0x0104:
+                self.box_item = None
+                self.finish_item("the cabinet cannot open it")
+            else:
+                # 0x0102: +04 offset, +08 file size, +0C bytes here, +10 data.
+                off, size, count = struct.unpack("<III", body[0:12])
+                self.box_data += body[12:12 + count]
+                if count:
+                    return self.say(0x0103, what="next chunk (%d/%d)" % (len(self.box_data), size))
+                name = item["path"].replace(":", "").replace("\\", os.sep).lstrip(os.sep)
+                dest = os.path.join(os.path.dirname(os.path.abspath(STATE_PATH)), "files", self.serial, name)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(self.box_data)
+                self.box_item = None
+                self.finish_item("saved as %s (%d bytes)" % (dest, len(self.box_data)))
+        return self.run_outbox()
 
     def next_report(self):
         """Read-only questions asked at the end of an update call; then
