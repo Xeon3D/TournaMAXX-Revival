@@ -434,6 +434,18 @@ be edited while the server runs, and each call reads it again if it changed
 - A final (status 4) for a tournament the cabinet never had gets no 0x0022
   from V8.04, and the call hangs until the cabinet gives up. The server sends
   finals and removals only to cabinets that had the tournament.
+- **Emerald V8.04 can't hold dates after 21 Aug 2002.** Tourney.dbf keeps
+  START, END and SHOWDATE as `%8d` of (time - 930000000) seconds (MEGACDLL
+  V8.04 0x97762 / 0x9784f). From 2002-08-21 that needs nine digits, the
+  ninth is cut off, and reads back as a date in early 2002. With a 2026
+  clock a running tournament shows as ENDED. Emerald 2 stores minutes
+  instead (fits until about 2160). Double Diamond V7.01 and Diamond V6.03
+  use the same 930000000 base, so they likely have the same limit. The
+  server can't help: START/END are relative to the cabinet's own clock.
+- The D:\Database files are dBase-like, with records encrypted from byte 1
+  (after the delete flag) as one stream: PC1 with the 10-byte key
+  "M@xxR0cks!", where the round index never advances (MEGACDLL V8.04
+  0x93fb0). TouchPPBox `scripts/p14-dbfcrypt.py` decodes them.
 
 ## Still open
 
