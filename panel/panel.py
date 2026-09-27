@@ -43,6 +43,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -200,11 +201,16 @@ def server_args():
 
 
 class ProcessService:
-    """The panel runs the server as its own child (for trying it out)."""
+    """The panel runs the server as its own child (trying it out, and in the
+    Docker image).  A server that stops without being told to is started
+    again, as systemd would."""
 
     def __init__(self):
         self.proc = None
         self.started = None
+        self.wanted = False
+        self.lock = threading.RLock()
+        threading.Thread(target=self.watch, daemon=True).start()
 
     def status(self):
         running = self.proc is not None and self.proc.poll() is None
@@ -212,24 +218,41 @@ class ProcessService:
                 "pid": self.proc.pid if running else None, "since": self.started if running else None}
 
     def start(self):
-        if self.status()["active"]:
-            return
-        cmd = [sys.executable, CFG["server_script"], "--log", log_path(), "--state", state_path()] + server_args()
-        self.proc = subprocess.Popen(cmd, cwd=CFG["data_dir"], stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=open(data("server-stderr.txt"), "ab"))
-        self.started = now()
-        time.sleep(0.5)
-        if self.proc.poll() is not None:
-            raise RuntimeError("the server stopped at once; see server-stderr.txt")
+        with self.lock:
+            self.wanted = True
+            if self.status()["active"]:
+                return
+            cmd = [sys.executable, CFG["server_script"], "--log", log_path(), "--state", state_path()] + server_args()
+            with open(data("server-stderr.txt"), "ab") as err:
+                self.proc = subprocess.Popen(cmd, cwd=CFG["data_dir"], stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=err)
+            self.started = now()
+            time.sleep(0.5)
+            if self.proc.poll() is not None:
+                raise RuntimeError("the server stopped at once; see server-stderr.txt")
 
     def stop(self):
-        if self.status()["active"]:
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.proc = None
+        with self.lock:
+            self.wanted = False
+            if self.status()["active"]:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+            self.proc = None
+
+    def watch(self):
+        while True:
+            time.sleep(5)
+            with self.lock:
+                if self.wanted and self.proc is not None and self.proc.poll() is not None:
+                    print("the server stopped (exit %s): starting it again" % self.proc.returncode, flush=True)
+                    self.proc = None
+                    try:
+                        self.start()
+                    except (OSError, RuntimeError) as e:
+                        print("could not start the server: %s" % e, flush=True)
 
     def restart(self):
         self.stop()
@@ -931,6 +954,10 @@ def main():
             print("could not start the server: %s" % e)
     httpd = http.server.ThreadingHTTPServer((CFG["listen"], int(CFG["port"])), Handler)
     httpd.daemon_threads = True
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt      # docker stop / systemctl stop: stop the server too
+    signal.signal(signal.SIGTERM, stop)
     print("control panel on http://%s:%d/" % (CFG["listen"], CFG["port"]), flush=True)
     try:
         httpd.serve_forever()

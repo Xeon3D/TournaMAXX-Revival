@@ -58,6 +58,22 @@ To try it on your own machine (it runs the server itself):
 then open http://127.0.0.1:8080/. The config (made on first run) sets the
 ports; see the top of `panel/panel.py`.
 
+## Docker
+
+The server and the panel in one image, for amd64 and arm64:
+
+    docker run -d --name tournamaxx --restart unless-stopped         -v tournamaxx:/data         -p 8080:8080 -p 2323:2323 -p 15000:15000 -p 17751:17751         -e TMX_ADMIN_PASSWORD=choose-one         xeon3d/tournamaxx-revival
+
+The panel is on port 8080 (user `admin`); it runs the server and starts it
+again if it stops. Without `TMX_ADMIN_PASSWORD` a password is made up and
+printed once in `docker logs tournamaxx`. Everything lives in the `/data`
+volume. On the first start `TMX_PORT` (default 2323) and `TMX_TCP_PORTS`
+(default `15000,17751`) set the ports; after that, change them in the panel
+and publish the same ports. Put the panel behind HTTPS before exposing it,
+and set `TMX_SECURE_COOKIES=true` when it is.
+
+To build it yourself: `docker build -t tournamaxx-revival .`
+
 ## On a server: `deploy/`
 
 `deploy/install.sh` sets it all up on Debian or Ubuntu, as root, from a copy
@@ -105,6 +121,7 @@ No game files are included here: the fix is made from your own copy.
 | `modem-server.py` | the server (Python 3, standard library only) |
 | `panel/` | the web control panel (`panel.py` and its page) |
 | `deploy/` | `install.sh`, the systemd units, nginx and logrotate config |
+| `Dockerfile`, `docker/` | the Docker image and its entrypoint |
 | `mkupdate.py`, `mkupdate.spec` | the update-package maker and its PyInstaller spec |
 | `datefix/` | the tournament date fix: `tmfix.py` (needs `capstone`), its LE loader `lefile.py`, Emerald V8.04's installer `NETUPDT-V804.BAT` |
 | `tools/dbfcrypt.py` | reads the cabinet's encrypted `D:\Database\*.dbf` files |

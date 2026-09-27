@@ -1,0 +1,16 @@
+.git
+.claude
+**/__pycache__
+*.log
+*.json
+!panel/static/*.json
+build/
+dist/
+files/
+outgoing/
+packages/
+backups/
+datefix/
+tools/
+deploy/
+mkupdate.spec
