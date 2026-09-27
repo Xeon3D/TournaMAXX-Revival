@@ -120,8 +120,9 @@ def ctext(b):
 #
 # What the server knows between calls lives in a JSON file next to the log
 # (--state): the tournaments it hands out, the players it has given permanent
-# IDs to, and every score the cabinets have uploaded.  Delete the file to
-# start again.
+# IDs to, and every score the cabinets have uploaded.  It can be edited while
+# the server runs: each call reads it again if it changed.  Delete the file
+# to start again.
 
 STATE = None
 STATE_PATH = None
@@ -148,21 +149,48 @@ def default_state():
     }
 
 
+STATE_MTIME = None   # the file's time when last read or written by us
+
+
 def load_state(path):
-    global STATE, STATE_PATH
+    global STATE, STATE_PATH, STATE_MTIME
     STATE_PATH = path
     try:
         with open(path, encoding="utf-8") as f:
             STATE = json.load(f)
+        STATE_MTIME = os.path.getmtime(path)
     except (OSError, ValueError):
         STATE = default_state()
         save_state()
 
 
+def reload_state_if_changed():
+    """Called as each call starts: the state file may have been edited by
+    hand since (tournaments, locations, the outbox), so read it again.  A
+    file that does not parse -- an edit half done -- is left alone."""
+    global STATE, STATE_MTIME
+    try:
+        mtime = os.path.getmtime(STATE_PATH)
+    except OSError:
+        return
+    if mtime == STATE_MTIME:
+        return
+    try:
+        with LOCK:
+            with open(STATE_PATH, encoding="utf-8") as f:
+                STATE = json.load(f)
+            STATE_MTIME = mtime
+        log("server", "state file changed on disk: read it again")
+    except ValueError as e:
+        log("server", "state file changed but does not parse (%s): keeping the old state" % e)
+
+
 def save_state():
+    global STATE_MTIME
     with LOCK:
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(STATE, f, indent=1)
+        STATE_MTIME = os.path.getmtime(STATE_PATH)
 
 
 def operator_page(lines):
@@ -227,6 +255,7 @@ class TournaMaxx:
     """
 
     def __init__(self, name, port=15000):
+        reload_state_if_changed()      # hand edits take effect on the next call
         self.name = name
         self.port = port
         self.buf = b""

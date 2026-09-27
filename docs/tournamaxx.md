@@ -375,7 +375,9 @@ first, then read back. *Reading verified.*
     python tools/modem-server.py --port 2323 --log modem-server.log --state modem-server-state.json
 
 Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
-2323 (Tools > Modem settings…). The state file holds:
+2323 (Tools > Modem settings…). The state file holds the following; it can
+be edited while the server runs, and each call reads it again if it changed
+(an edit that does not parse is ignored until it does):
 
 - `tournaments`: id, game, start/end (Unix times), credits, name, desc,
   randseed, seedinc, groups, prizes, showdate, final_days. The status is
