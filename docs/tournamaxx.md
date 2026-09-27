@@ -540,6 +540,13 @@ each only the commands its dispatcher has (`KNOWS` in `modem-server.py`):
   Emerald 2's (V7.01 at 0x95bae); Diamond V6.03 through a chain of compares
   (0x9083f). A command a client does not have gets no answer, and the call
   hangs until the cabinet gives up.
+- **Before Diamond there is no server client.** MAXX (V3.06), MAXX 2K (V4.01)
+  and MAXX 2K Plus (V5.00) export `NT_CONNECT_TO_SERVER`, but it only returns
+  0 (V4.01 0x7be4c). Their network is Mega-Link: cabinets linked over
+  Ethernet for head-to-head games and linked tournaments, through Novell ODI
+  drivers and the NetPort TCP/IP TSR that `AUTOEXEC.BAT` starts
+  (`ETHERNET\STARTTCP.BAT`: `LSL`, the `TE16XP` link driver, `NPTSR`). The
+  dial-up code in them is part of that library, and nothing calls it.
 - A final (status 4) for a tournament the cabinet never had gets no 0x0022
   from V8.04 either, so the server sends finals and removals only to
   cabinets that had the tournament.
