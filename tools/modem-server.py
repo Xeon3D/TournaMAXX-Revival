@@ -278,6 +278,8 @@ class TournaMaxx:
         # is rolled back by the cabinet (Emerald V8.04 restores its
         # databases), so everything in it has to go again next time.
         self.uncommitted = []
+        self.protocol = None
+        self.updates_checked = False
 
     @staticmethod
     def msg(t, body=b""):
@@ -433,6 +435,11 @@ class TournaMaxx:
             # its new players, its scores; then COMPLETE.
             if t == 0x0012:
                 self.serial = ctext(body[2:16])   # the machine serial
+                self.protocol = struct.unpack("<H", body[0:2])[0]
+                STATE.setdefault("logins", {})[self.serial] = {
+                    "protocol": self.protocol, "port": self.port,
+                    "at": int(time.time()), "raw": body.hex()}
+                save_state()
             if t == 0xFF02:
                 self.commit()
             if t == 0x0012 and self.port != 17751:
@@ -551,11 +558,65 @@ class TournaMaxx:
     #   {"do": "fetch_file", "path": "C:\\PATH"}          0x0101/0x0103, saved
     #                                                  under files\<serial>\
     #   {"do": "delete", "path": "C:\\PATH", "reboot": false}    0x0121
+    #                                  (an empty path only reboots)
     # Done items move to "outbox_done".
+    #
+    # Update packages, in the state file under "updates" -> name:
+    #   {"protocol": 7, "send": [["local file", "C:\\PATH"], ...],
+    #    "result": "C:\\RESULT.TXT"}
+    # go once to every cabinet whose login carries that protocol version:
+    # the files, then a reboot.  A C:\NETUPDT.BAT among them is run by the
+    # cabinet's TEST.BAT at boot, then deleted.  At the next call the result
+    # file is fetched and deleted; its text becomes the cabinet's entry in
+    # "update_status" -> name -> serial.
 
     CHUNK = 1024
 
+    def queue_updates(self):
+        box = STATE.setdefault("outbox", {}).setdefault(self.serial, [])
+        for name, u in STATE.get("updates", {}).items():
+            if u.get("protocol") not in (None, self.protocol):
+                continue
+            status = STATE.setdefault("update_status", {}).setdefault(name, {})
+            st = status.get(self.serial)
+            if any(i.get("update") == name for i in box):
+                continue                              # still going out
+            if st is None:
+                items = [{"do": "send_file", "from": src, "to": dst, "update": name}
+                         for src, dst in u.get("send", [])]
+                items.append({"do": "delete", "path": "", "reboot": True, "update": name})
+                status[self.serial] = "queued"
+                # The update may clear the cabinet's tournaments: it gets the
+                # running ones again, and no finals for the others.
+                for sers in STATE.get("had", {}).values():
+                    if self.serial in sers:
+                        sers.remove(self.serial)
+                self.uncommitted = [x for x in self.uncommitted if x[0] != "had"]
+            elif st == "queued" and u.get("result"):
+                items = [{"do": "fetch_file", "path": u["result"], "update": name},
+                         {"do": "delete", "path": u["result"], "reboot": False, "update": name}]
+                status[self.serial] = "checking"
+            elif st == "checking":
+                name_on_disk = u["result"].replace(":", "").replace("\\", os.sep).lstrip(os.sep)
+                got = os.path.join(os.path.dirname(os.path.abspath(STATE_PATH)), "files",
+                                   self.serial, name_on_disk)
+                try:
+                    with open(got, "rb") as f:
+                        status[self.serial] = f.read().decode("latin1").strip() or "empty result"
+                except OSError:
+                    status[self.serial] = "no result file"
+                log(self.name, "  update %s: %s" % (name, status[self.serial]))
+                continue
+            else:
+                continue
+            box[0:0] = items
+            log(self.name, "  update %s: %s" % (name, status[self.serial]))
+        save_state()
+
     def run_outbox(self):
+        if not self.updates_checked and self.port == 17751:
+            self.updates_checked = True
+            self.queue_updates()
         box = STATE.setdefault("outbox", {}).setdefault(self.serial, [])
         out = b""
         while box:
