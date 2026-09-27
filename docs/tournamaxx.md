@@ -1,10 +1,18 @@
-# TournaMAXX protocol (DOS MAXX, Emerald 2 V9.01)
+# TournaMAXX protocol (DOS Megatouch MAXX)
 
 Worked out from `MERIT2\EXEC\MEGACDLL.EXE` of MAXX Emerald 2 V9.01 (PG3002,
 SHA-256 `1e490ccd…2b4c`), decompiled with Ghidra, and from calls the game
 made to `modem-server.py`. Addresses are that executable's (LE object 1
-at 0x10000, fixups applied). Emerald V8.04 speaks the same protocol at
-version 7.
+at 0x10000, fixups applied) unless another release is named. The older
+DOS releases speak the same protocol with fewer commands; see
+[Older releases](#older-releases).
+
+| Release | Login protocol | Login size | Server status |
+|---|---|---|---|
+| Emerald 2 V9.00 / V9.01 | 9 | 166 bytes | works |
+| Emerald V8.04 | 7 | 146 bytes | works |
+| Double Diamond V7.01 | 6 | 81 bytes | works |
+| Diamond V6.03 | 3 | 81 bytes | works |
 
 What is marked *verified* has been seen on the wire from the running game;
 the rest is read from the code.
@@ -41,9 +49,10 @@ little-endian, `length` counting the 4-byte header. The cabinet peeks the
 ## Who talks
 
 The **server** drives. It sends an odd-numbered command; the cabinet runs its
-handler and answers with the next number up. The dispatcher (switch at
-0x9ced0) knows 25 types; anything else makes the cabinet send 0xFF02 and log
-"SERVER ERROR REPORTED".
+handler and answers with the next number up. Emerald 2's dispatcher (switch
+at 0x9ced0) knows the 24 types below; anything else makes it send 0xFF02 and
+log "SERVER ERROR REPORTED". Older releases know fewer, and the server sends
+each only what its protocol version has (see [Older releases](#older-releases)).
 
 | Server sends | Handler | Cabinet answers | What it is |
 |---|---|---|---|
@@ -53,7 +62,7 @@ handler and answers with the next number up. The dispatcher (switch at
 | 0x0051 | 0x9db94 | 0x0052 | new players: empty = "next one?", with a body = "here is its permanent ID". *Verified.* |
 | 0x0067 | 0x9e98c | 0x0068 | score upload, one batch per request. *Verified.* |
 | 0x0073 | 0x9ea94 | 0x0074 (empty) | rankings. *Verified.* |
-| 0x0081 | 0x9e6bc | 0x0082 (empty) | players from other cabinets. *Verified.* |
+| 0x0081 | 0x9e6bc | 0x0082 (empty) | players (with their locations). *Verified.* |
 | 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and dial-up options, into `C:\NTNVRAM.DAT`. *Verified.* |
 | 0x00C1 | 0x9fab8 | 0x00C2, 0x00C3 | game statistics, two periods. *Verified.* |
 | 0x00C9 | 0xa0268 | 0x00CA | event counters (cleared once sent). *Verified.* |
@@ -84,25 +93,49 @@ What `modem-server.py` does, and the cabinet accepts: *verified*
     0051             (×n) → 0052 a new player → 0051 with its permanent ID …
                           → 0052 empty (this also readies the first score batch)
     0067             (×n) → 0068 scores … → 0068 empty
-    0073 rankings    (×n) → 0074
+    00D1 locations   (×n) → 00D2   the home cabinets of the players below,
+                                   where this cabinet lacks them or they changed
+    0081 players     (×n) → 0082   every player this cabinet has not been
+                                   sent yet, its own included, 20 a message
+    0073 rankings    (×n) → 0074   (Diamond V6.03: 0071 → 0072)
     00B1 location               (no answer)
     0021 finals      (×n) → 0022   tournaments that have ended: STATUS 4
-                                   (after their final rankings), later 5
-    0201, 0211, 0221, 00C1, 00E1   reports (read only)
+                                   (after their final rankings), later 5;
+                                   only to cabinets that had the tournament
+    outbox, update packages        whatever is queued for this cabinet
+    0201, 0211, 0221, 00C1, 00E1   reports (read only; those the client has)
     FF01 "COMPLETE."      → FF02, and the cabinet hangs up
 
 The order matters: 0x0067 before the empty 0x0052 makes the cabinet send an
-unprepared buffer (length 0xAAAA and whatever follows it in memory).
+unprepared buffer (length 0xAAAA and whatever follows it in memory). Players
+must be sent before the rankings that name them, and locations before the
+players that carry them.
+
+A call that breaks off before COMPLETE is rolled back by the cabinet (it
+restores its databases from the `.bak` copies at the next boot), so the
+server counts what a call delivered (players, locations, tournaments,
+finals, removals) as delivered only once 0xFF02 arrives.
 
 ## Messages
 
-### 0x0012 login (cabinet), 166 bytes at version 9. *Verified.*
+### 0x0012 login (cabinet). *Verified.*
 
-    +04 u16   protocol version (9; V8.04: 7)
+166 bytes at protocol 9, 146 at 7:
+
+    +04 u16   protocol version (Emerald 2: 9; Emerald V8.04: 7)
     +06 char  machine serial ("1234567")
     +16 char  "supersecretpasswordthing"
     …         key data, "10d62a81", the cabinet's clock, the access number,
               the ISP login and password, the game's key id ("SA304801 R01")
+
+81 bytes at protocols 6 (Double Diamond V7.01) and 3 (Diamond V6.03), which
+also carry the game's version, scanned from its version text with
+`"PG3002 V%d.%d "` (so V7.01 is 7 and 1):
+
+    +04 u16   protocol version (6 or 3)
+    +06 char  machine serial
+    +3B u32   version, major
+    +3F u32   version, minor
 
 ### 0x0021 tournament (server), 502 bytes. *Verified.*
 
@@ -129,7 +162,12 @@ Written into `D:\Database\tourney.dbf`.
     +0BC u32  SEEDINC
     +0C0 char GROUP1..3[51] each
     +159 char PRIZE1..3[51] each
-    +1F2 i32  SHOWDATE            seconds from now
+    +1F2 i32  SHOWDATE            seconds from now (Diamond V6.03 has no
+                                  SHOWDATE)
+
+START and END are relative to the cabinet's own clock: it adds its time to
+them. How the cabinet then stores them is where Emerald V8.04 and older
+break (see [the date limit](#the-2002-date-limit)).
 
 ### 0x0042 tournaments held (cabinet), 142 bytes. *Verified.*
 
@@ -180,12 +218,32 @@ score table. Up to 60 entries of 34 bytes:
     +0E u32   the player's five scores
 
 The ranking screens show the sum of the five divided by five. The handle,
-city and state come from the cabinet's own player database (so players it
-does not know need 0x0081 first).
+city and state come from the cabinet's own player database, and the location
+name from its location database, so the players (0x0081) and their
+locations (0x00D1) have to be sent first. A player it does not know shows as
+"PLAYER" (V8.04: 0x9cea4).
 
-### 0x0081 players from elsewhere (server)
+### 0x0071 rankings, older form (server). *Verified (Diamond V6.03).*
 
-Entries of 97 bytes; the cabinet answers 0x0082 first.
+The only rankings message Diamond V6.03 has; Emerald V8.04 and Double
+Diamond V7.01 have both. The cabinet answers 0x0072 at once. Up to 20
+entries of 92 bytes, one per player and tournament, covering the three
+groups (V8.04 0x9c270, Diamond 0x9239c):
+
+    +00 u32   TOURNID
+    +04 u32   PLAYERID
+    +08 u32   total[3]      the sum of the five scores, per group
+    +14 u32   rank[3]       per group; -1: not ranked in that group
+    +20 u32   score[3][5]   per group
+
+Where a player or their location is unknown it shows "Player", "Network",
+"Earth" and "Unknown".
+
+### 0x0081 players (server). *Verified.*
+
+Entries of 97 bytes, at most 20 a message; the cabinet answers 0x0082. The
+server sends every player a cabinet has not been sent yet, the cabinet's own
+included, so that each has a location there.
 
     +00 u32   player ID (0: skipped)
     +04 u32
@@ -193,14 +251,19 @@ Entries of 97 bytes; the cabinet answers 0x0082 first.
     +15 char  PIN[5]
     +1A char  CITY[31]
     +39 char  STATE[36]
-    +5D u32   LOCATION
+    +5D u32   LOCATION       the location ID (0x00D1) of the player's home
+                             cabinet; the server uses that cabinet's serial
 
-An empty HANDLE or PIN deletes the player.
+Bytes +04 to +5C are the player's record as their cabinet sent it in 0x0052.
+An empty HANDLE or PIN deletes the player; a player the cabinet already has
+is updated.
 
 ### 0x00D1 locations (server)
 
 Entries of 154 bytes, into `location.dbf`; the cabinet answers 0x00D2.
-*Verified.*
+*Verified.* The server sends one for each cabinet whose players it sends:
+ID the cabinet's serial, the rest from that cabinet's `locations` entry in
+the state file (`city_state` split at the comma).
 
     +00 u32   ID
     +04 char  NAME[52]     (empty: the location is deleted)
@@ -374,35 +437,70 @@ first, then read back. *Reading verified.*
 
     python modem-server.py --port 2323 --log modem-server.log --state modem-server-state.json
 
-Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
-2323 (Tools > Modem settings…). The state file holds the following; it can
-be edited while the server runs, and each call reads it again if it changed
-(an edit that does not parse is ignored until it does):
+In MegaPPBox: *Tools > Modem on COM2*, then *Tools > Modem settings…*: "Dial
+out to a TCP/IP host", 127.0.0.1, port 2323. Several cabinets can call at
+once; their messages are handled one at a time. The state file (created with
+a test tournament if missing) holds the following. It can be edited while the
+server runs: each call reads it again if it changed (an edit that does not
+parse is ignored until it does).
 
-- `tournaments`: id, game, start/end (Unix times), credits, name, desc,
-  randseed, seedinc, groups, prizes, showdate, final_days. The status is
-  worked out from the clock.
-- `players`, `scores`: what the cabinets have sent.
-- `locations` → machine serial: name, city_state, country, telephone: the
-  LOCATION INFO screen, and the registration page of Initial Connection.
+What the operator sets:
+
+- `tournaments`: id, game, start/end (Unix times), credits, gameopts, name,
+  desc, randseed, seedinc, groups, prizes, showdate, final_days. The status
+  is worked out from the clock.
+- `locations` → machine serial: name, city_state, country, telephone. The
+  cabinet's LOCATION INFO screen (0x00B1), the registration page of Initial
+  Connection, and the location other cabinets show for its players (0x00D1).
+  A cabinet's entry is made with placeholder text at its first call.
 - `outbox` → machine serial: done at that cabinet's next update call, then
-  moved to `outbox_done`:
-  - `{"do": "message", "text": "line\nline"}`: a registration page
+  moved to `outbox_done` with the outcome. An item the cabinet's client has
+  no command for is skipped as "not for this cabinet".
+  - `{"do": "message", "text": "line\nline"}`: a registration page (0x0A11)
   - `{"do": "send_file", "from": "local path", "to": "C:\\PATH"}`
   - `{"do": "fetch_file", "path": "C:\\PATH"}`: saved under `files\<serial>\`
-  - `{"do": "delete", "path": "C:\\PATH", "reboot": false}`
-  - `{"do": "settings", "volume": 30}` (the percentage the operator menu
-    shows), or `{"do": "settings", "set": {"+0A": 38}}` (raw bytes of 0x0201)
+  - `{"do": "delete", "path": "C:\\PATH", "reboot": false}`: an empty path
+    only reboots
+  - `{"do": "settings", ...}` (0x0201): `"volume": 30` (the percentage the
+    operator menu shows), `"set": {"+0A": 38}` (bytes at message offsets),
+    `"set16": {"+11": 4123}` (16-bit values), `"clear_scores": [[48, 255]]`
+    (high-score clears, game and category). Built on the last 0x0202 the
+    cabinet reported, so it needs one earlier call.
+  - `{"do": "prices", "set": {"48": 3}}` (0x0211: game, credits per play)
   - `{"do": "dialup", "set": {"update_hour": 10, "phone": "...", "login": "...",
     "password": "...", "server": "...", "dns1": "...", "dns2": "..."}}`
   - `{"do": "isp", "login": "...", "password": "..."}`
   - `{"do": "location_entry", "id": 1, "name": "...", "city": "...",
     "state": "...", "country": "..."}`
   - `{"do": "counters"}`: read (and so clear) the event counters
-- `reports` → machine serial: the settings, statistics and call history
-  each update call reads.
+- `updates` → name: software update packages (see
+  [Update packages](#update-packages)):
+  - `"send": [["local file", "C:\\PATH"], ...]`: the files; the cabinet is
+    then rebooted
+  - `"protocol": 7`: only for cabinets whose login has that protocol
+  - `"result": "C:\\RESULT.TXT"`: a file the update writes; fetched (and
+    deleted) at the next call, its text becomes the outcome
+  - `"version": "7.01"`, `"becomes": "7.20"` (protocols 6 and 3, whose
+    logins carry the version): only for cabinets logging in with `version`;
+    installed when one logs in with `becomes`
 
-## The cabinet's databases (dBase III, `D:\Database\`)
+What the server keeps:
+
+- `players` (with `next_player_id`), `scores`: what the cabinets have sent.
+- `reports` → machine serial: the settings, statistics and call history each
+  update call reads.
+- `logins` → machine serial: the last login (protocol, version, raw bytes).
+- `update_status` → update → machine serial: queued, checking, or the outcome.
+- `had`, `final`, `removed`, `players_sent`, `locations_sent`: what each
+  cabinet has been given, so that nothing is sent twice.
+
+## The cabinet's databases (`D:\Database\`)
+
+dBase III files whose records are encrypted from byte 1 (after the delete
+flag) as one stream: PC1 with the 10-byte key "M@xxR0cks!", where the round
+index never advances (V8.04 0x93fb0). `tools/dbfcrypt.py` decodes them. At
+boot, a `.bak` next to a file replaces it (the rollback of a broken call).
+
 
 - **player.dbf**: ID N8, TEMPID N8, HANDLE C12, PIN C4, LOCATION N8, MODIFY N8,
   FIRSTNAME C20, LASTNAME C20, ADDRESS C30, CITY C30, STATE C35,
@@ -420,44 +518,73 @@ be edited while the server runs, and each call reads it again if it changed
 
 ## Older releases
 
-- **Emerald V8.04** (protocol 7, a 146-byte login) handles the same commands
-  as Emerald 2, plus **0x0071**, an older rankings message: up to 20 entries
-  of 92 bytes (u32 tournament, u32 player, u32 rank[3], u32 [3] per group,
-  u32 score[3][5]), answered 0x0072. It fills the same ranking rows as 0x0073,
-  so the server doesn't need it.
-- A ranking row whose player isn't in the cabinet's player database is shown
-  as "PLAYER" (0x0073 at 0x9cea4; 0x0071 uses "Player" / "Network" / "Earth").
-  The names come from 0x0081, which has to come before the rankings.
-- A call that breaks off before COMPLETE is rolled back by the cabinet, so the
-  server keeps what a call delivered (players, finals, removals) only once
-  0xFF02 arrives.
+The server tells them apart by the protocol version in the login and sends
+each only the commands its dispatcher has (`KNOWS` in `modem-server.py`):
+
+| Command | Emerald 2 (9) | Emerald V8.04 (7) | Double Diamond V7.01 (6) | Diamond V6.03 (3) |
+|---|---|---|---|---|
+| 0x0011–0x0067, 0x0081, 0x00B1, 0x00C1, 0x00D1, files, 0x0121, 0x0A01, 0x0A11, 0xFF01 | yes | yes | yes | yes |
+| 0x0073 rankings | yes | yes | yes | — |
+| 0x0071 rankings, older form | — | yes | yes | yes |
+| 0x00C9 counters, 0x00E1 call history | yes | yes | yes | — |
+| 0x0201, 0x0211, 0x0221 settings | yes | yes | — | — |
+| 0xFF11 | yes | yes | — | yes |
+| 0x0031 (not known) | — | — | — | yes |
+
+- Emerald V8.04 and Double Diamond V7.01 dispatch through a table like
+  Emerald 2's (V7.01 at 0x95bae); Diamond V6.03 through a chain of compares
+  (0x9083f). A command a client does not have gets no answer, and the call
+  hangs until the cabinet gives up.
 - A final (status 4) for a tournament the cabinet never had gets no 0x0022
-  from V8.04, and the call hangs until the cabinet gives up. The server sends
-  finals and removals only to cabinets that had the tournament.
-- **Emerald V8.04 can't hold dates after 21 Aug 2002.** Tourney.dbf keeps
-  START, END and SHOWDATE as `%8d` of (time - 930000000) seconds (MEGACDLL
-  V8.04 0x97762 / 0x9784f). From 2002-08-21 that needs nine digits, the
-  ninth is cut off, and reads back as a date in early 2002. With a 2026
-  clock a running tournament shows as ENDED. Emerald 2 stores minutes
-  instead (fits until about 2160). Double Diamond V7.01 and Diamond V6.03
-  use the same 930000000 base, so they likely have the same limit. The
-  server can't help: START/END are relative to the cabinet's own clock.
-- The D:\Database files are dBase-like, with records encrypted from byte 1
-  (after the delete flag) as one stream: PC1 with the 10-byte key
-  "M@xxR0cks!", where the round index never advances (MEGACDLL V8.04
-  0x93fb0). TouchPPBox `scripts/p14-dbfcrypt.py` decodes them.
-- **Update packages.** At boot a cabinet's TEST.BAT runs
-  `C:\NetUpdt.exe -d -o c:\` (a PKZIP self-extractor), then `C:\NetUpdt.bat`,
-  and deletes each: that is how Merit shipped network updates. The server's
-  "updates" send such a file with 0x0111/0x0112, reboot with an empty-path
-  0x0121 (which only reboots), and fetch a result file on the next call.
-  The Emerald V8.04 date fix goes this way as one 735 KB PKSFX (the exe alone
-  is 1.7 MB); its batch file installs the new exe only if the old and new
-  ones are both 1,713,893 bytes. Tested: a cabinet running the original exe
-  reported "TMFIX-804 INSTALLED".
+  from V8.04 either, so the server sends finals and removals only to
+  cabinets that had the tournament.
+
+### The 2002 date limit
+
+Emerald V8.04, Double Diamond V7.01 and Diamond V6.03 keep a tournament's
+START, END and SHOWDATE in Tourney.dbf as `%8d` of (time − 930,000,000)
+seconds (V8.04 0x97762 load, 0x9784f save). From 2002-08-21 that needs nine
+digits; the ninth is cut off, and the time reads back as early 2002, so with
+a present-day clock every tournament shows as ENDED. Emerald 2 stores minutes
+instead. The server can't help: START and END are relative to the cabinet's
+own clock.
+
+`datefix/tmfix.py` fixes the executable: the load and save code is rewritten
+in place (same registers, every call at its own address) to store minutes,
+good until 2038, and the version shown becomes x.20 (V8.20, V7.20, V6.20).
+Nothing in the game compares the version text; Double Diamond and Diamond
+put it in their login, so the server sees the new version. Verified on all
+three: dates correct, rankings shown.
+
+### Update packages
+
+At boot a cabinet's `TEST.BAT` runs `C:\NetUpdt.exe -d -o c:\` (a PKZIP 2.04g
+self-extractor: extract under C:\, with folders, overwriting) and deletes it;
+Emerald V8.04's then also runs `C:\NetUpdt.bat` and deletes that. That is
+how Merit shipped network updates. The server's `updates` send such a file
+with 0x0111/0x0112, reboot the cabinet with an empty-path 0x0121, and on the
+next call either fetch the update's result file or read the version in the
+login. `mkupdate.py` makes the self-extractor from a folder laid out as the
+cabinet's C:\ (PKSFX 2.04g's stub, then an ordinary zip).
+
+- **Emerald V8.04**: the package holds `NETUPDT.BAT` and
+  `MERIT2\EXEC\MEGACDLL.NEW` (735 KB; the exe alone is 1.7 MB). The batch
+  file installs the new exe only if it and the old one are both 1,713,893
+  bytes, deletes the old-format `Tourney.dbf`, and writes `C:\TMFIX.TXT`.
+  *Verified: "TMFIX-804 INSTALLED".*
+- **Double Diamond V7.01, Diamond V6.03**: their `TEST.BAT` runs only the
+  self-extractor and they have no `FIND.EXE`, so the package holds
+  `MERIT2\EXEC\MEGACDLL.EXE` itself, sent only to cabinets whose login says
+  7.01 / 6.03; the update counts as installed when they log in as 7.20 /
+  6.20. The running tournaments are sent again at that call and stored in
+  the new form. *Verified.*
+
+A transfer that breaks off leaves an incomplete self-extractor, which finds
+no zip directory and extracts nothing.
 
 ## Still open
 
 - 0x00B1's thirteen option bytes.
+- Diamond V6.03's 0x0031.
 - The per-game record's field at +03, and the names of games 11, 58, 69, 83.
 - The Linux MAXX releases (Ruby onward), which have their own client.

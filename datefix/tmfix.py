@@ -14,8 +14,9 @@ fixed game can be told apart; nothing compares it (only printed and logged).
 
 Usage: tmfix.py check <exe>              -> unpatched / patched / unknown
        tmfix.py patch <in.exe> <out.exe> -> writes the fixed exe
-Existing Tourney.dbf records are in the old encoding: remove the tournaments
-(or the file) after patching.  Prints input and output SHA256.
+Existing Tourney.dbf records are in the old encoding: V8.04's update package
+deletes the file; on the others the server's next call sends the running
+tournaments again, which rewrites them.  Prints input and output SHA256.
 """
 import hashlib
 import re

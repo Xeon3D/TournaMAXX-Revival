@@ -58,3 +58,22 @@ changes its version to x.20 (V8.20, V7.20, V6.20). See
 install it from the server.
 
 No game files are included here: the fix is made from your own copy.
+
+## What's here
+
+| Path | What |
+|---|---|
+| `modem-server.py` | the server (Python 3, standard library only) |
+| `mkupdate.py`, `mkupdate.spec` | the update-package maker and its PyInstaller spec |
+| `datefix/` | the tournament date fix: `tmfix.py` (needs `capstone`), its LE loader `lefile.py`, Emerald V8.04's installer `NETUPDT-V804.BAT` |
+| `tools/dbfcrypt.py` | reads the cabinet's encrypted `D:\Database\*.dbf` files |
+| `docs/tournamaxx.md` | the protocol, the state file, the older releases |
+
+## Licence
+
+GPL-3.0; see [LICENSE](LICENSE).
+
+The PKSFX 2.04g self-extractor stub carried in `mkupdate.py` (and so in every
+package it makes) is PKWARE's code, not covered by the GPL. PKWARE's PKZIP
+2.04g licence asks for a distribution licence for self-extracting files made
+with ZIP2EXE.
