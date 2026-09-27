@@ -264,19 +264,59 @@ The server sends a file:
 An empty 0x0201 / 0x0211 / 0x0221 reads a block; with a body it is written
 first, then read back. *Reading verified.*
 
-- **0x0202** (285 bytes): operator settings: flags, volume, TournaMAXX
-  options, and the list of games switched on (84 game slots). Known:
+- **0x0202** (285 bytes): the system settings. They live in the exported
+  structure `_NVRAMDATA` (0x17a050, 32 KB, saved as `C:\NVRAM.DAT`); the
+  second column is the offset in it, which is also the offset in
+  NVRAM.DAT. Labels are SETUP.DLL's buttons for the field.
 
-      +0A u8   volume, a mixer level 0–127 (values from 0x80 up are
-               ignored); the operator menu shows it as a percentage of 127,
-               rounded down (30 shows as 23). *Verified.*
-      +15      the game list, pairs (game, value) up to game 0x54; 0xFF here
-               in a 0x0201 leaves the games as they are (another value may
-               switch games on or off)
+      +04 u8   0x3d7   adult (Strip) games: 0 off, 1 on, 2 on between the
+                       two hours below
+      +05 u8   0x3ed   nudity allowed
+      +06 u8   0x3ee   TOPLESS (0) / FULLNUDE (1)
+      +07 u8   0x1167  adult games on from hour (bits 0–4)  SXONUP/SXONDN
+      +08 u8   0x1167  adult games off at hour (bits 5–9)   SXOFFUP/SXOFFDN
+      +09 u8   0x3e2   adult attract screens (0: the "mini" attract loop)
+      +0A u8   —       volume, a mixer level 0–127; the operator menu
+                       shows it as a percentage of 127, rounded down
+      +0B u8   0x3dc   security PIN on
+      +0C u8   0x3e9   HIGH SCORES reachable without the PIN
+      +0D u8   0x3ea   VIDEO BILLBOARD           "
+      +0E u8   0x3eb   VOLUME CONTROL            "
+      +0F u8   0x3f4   SCREEN CALIBRATION        "
+      +10 u8   0x401   UPDATE FROM SERVER        "
+      +11 u16  0x389   security PIN, 0–9999 (default 4123)
+      +13 u8   0x3e6   adult content (lifts the high-score name filter,
+                       BADNAME.DAT; gates the AC setting)
+      +14 u8   0x1167  AC level 1–4 (bits 10–12)             ACUP/ACDN
+      +15 …            (unset in the reply)
+      +BD u8[96] 0x3cf the raw block _NVRAMDATA[0x3cf:0x42f], which
+                       holds all of the above and a few more
 
-  A 0x0201 carrying the first 0x11 bytes of a 0x0202 with a field changed,
-  and 0xFF at +15, changes just that field. *Verified.*
-- **0x0212** (172 bytes): a 4-bit setting for each of the 84 games.
+  In a 0x0201 each field is only written when in range (+04 < 3; flags < 2;
+  hours < 24; +0A < 0x80; +11 < 10000; +14 < 5), and +05…+09 only when +04
+  is set, +0C…+10 only when +0B is set, +14 only when +13 is 1. From +15 a
+  0x0201 carries **high-score clears**: pairs (game, category) up to game
+  0x54 — the category matters for the trivia games (3 and 33, seven
+  categories each; 0xFF: all); a first byte from 0x54 up clears every
+  game's high scores; 0xFF clears none. (MEGACDLL 0x1bda0: ten 19-byte
+  entries per game.) *Verified: the volume.*
+
+- **0x0212** (172 bytes): the **price of each game**, 84 pairs (game number,
+  credits per play 0–15; 0: not offered). The low 4 bits of the game's
+  record (below); shown as "%dCR". While a tournament runs its CREDITS
+  replace the game's price. A 0x0211 carries the same pairs.
+
+- **The per-game record**, 36 bytes at `_NVRAMDATA`+0x42f + game × 0x24:
+
+      +00 u8   flags (bits 0–6: offered / in a menu)
+      +01 u16  low 4 bits: price in credits; upper 12: the game's number
+      +03 u32  (set from the SQCL / DEFAULT / OVCL / CCCL screen)
+      +07 u32  current period: play times, packed (shortest / average /
+               longest, 10-bit fields)
+      +0B u16×5 current period: games by number of players
+      +15 u32  lifetime: play times, packed
+      +19 u16×5 lifetime: games by number of players
+
 - **0x0222** (315 bytes): the Dial-Up Network screen. *Verified:*
 
       +004 char  modem init string   "AT&FE1V1&C1&D2S95=45S2=43S12=3S24=0"
@@ -298,11 +338,25 @@ first, then read back. *Reading verified.*
 
 ### Reports
 
-- **0x00C2 / 0x00C3**: game statistics, one message per period (current and
-  previous): a 54-byte header (totals, the period's year and month), then per
-  game 23 bytes (game number, category, share of play, plays in bands).
-- **0x00C9**'s answer: 14-byte records: an event code, an index, three
-  counters. The cabinet clears these once sent.
+- **0x00C2 / 0x00C3**: game statistics, current period and lifetime: a
+  54-byte header (totals, the period's start year and month), then for each
+  game offered 23 bytes: game number, price, share of play (%), total plays,
+  the game's number (upper 12 bits of the record), three 10-bit play times,
+  and the plays by number of players — from the per-game record above.
+- **0x00CA** (the answer to 0x00C9): 14-byte records, only those not zero:
+
+      +0 u8   code          +1 u8 index
+      +2 u32  a             +6 u32 b             +A u32 c
+
+  - code 3, index 0–6: the coin inputs; a current, b lifetime count
+    (`_NVRAMDATA`+0x3f / +0x4d, the books' E3/E4 COINS)
+  - code 0x21, index 0–6: the bill acceptor, likewise (+0x5b / +0x69,
+    B1/B2)
+  - codes 11 (index 0–4), 83, 58, 69, 52, 53: per-game counters for
+    licensed games (52 and 53 are the Jumble word games; their daily
+    puzzles are `MISC\USER\WJDDC.DAT`): a and b running totals, c the plays
+    since the last report — after a successful 0x00CA the cabinet zeroes c.
+    Most likely the royalty report. *Verified: answered 0x00CA.*
 - **0x00E2**: the last 14 calls, 14 bytes each: u32 start, u32 end (time_t),
   u8 status, u8 error code, … *Verified.*
 
@@ -354,6 +408,6 @@ Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
 
 ## Still open
 
-- The meaning of each byte in 0x0202, 0x0212 and 0x00B1's options, and of
-  0x00C9's event codes.
+- 0x00B1's thirteen option bytes.
+- The per-game record's field at +03, and the names of games 11, 58, 69, 83.
 - The Linux MAXX releases (Ruby onward), which have their own client.
