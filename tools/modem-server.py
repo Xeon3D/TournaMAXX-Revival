@@ -597,16 +597,10 @@ class TournaMaxx:
                          {"do": "delete", "path": u["result"], "reboot": False, "update": name}]
                 status[self.serial] = "checking"
             elif st == "checking":
-                name_on_disk = u["result"].replace(":", "").replace("\\", os.sep).lstrip(os.sep)
-                got = os.path.join(os.path.dirname(os.path.abspath(STATE_PATH)), "files",
-                                   self.serial, name_on_disk)
-                try:
-                    with open(got, "rb") as f:
-                        status[self.serial] = f.read().decode("latin1").strip() or "empty result"
-                except OSError:
-                    status[self.serial] = "no result file"
-                log(self.name, "  update %s: %s" % (name, status[self.serial]))
-                continue
+                # The result fetch broke off (a fetched result is recorded
+                # when it arrives): ask again.
+                items = [{"do": "fetch_file", "path": u["result"], "update": name},
+                         {"do": "delete", "path": u["result"], "reboot": False, "update": name}]
             else:
                 continue
             box[0:0] = items
@@ -766,6 +760,7 @@ class TournaMaxx:
             if t == 0x0104:
                 self.box_item = None
                 self.finish_item("the cabinet cannot open it")
+                self.update_result(item, "no result file")
             else:
                 # 0x0102: +04 offset, +08 file size, +0C bytes here, +10 data.
                 off, size, count = struct.unpack("<III", body[0:12])
@@ -779,7 +774,15 @@ class TournaMaxx:
                     f.write(self.box_data)
                 self.box_item = None
                 self.finish_item("saved as %s (%d bytes)" % (dest, len(self.box_data)))
+                self.update_result(item, self.box_data.decode("latin1").strip() or "empty result")
         return self.run_outbox()
+
+    def update_result(self, item, text):
+        """A fetched update result file: its text is the update's outcome."""
+        if item.get("update"):
+            STATE.setdefault("update_status", {}).setdefault(item["update"], {})[self.serial] = text
+            save_state()
+            log(self.name, "  update %s: %s" % (item["update"], text))
 
     def next_report(self):
         """Read-only questions asked at the end of an update call; then
