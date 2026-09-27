@@ -164,10 +164,25 @@ def save_state():
             json.dump(STATE, f, indent=1)
 
 
-def tournament_body(t):
+def tournament_status(t, now=None):
+    """What a tournament is, by the clock (MEGACDLL 0xa419c): 1 announced,
+    2 running, 4 final (winners shown for final_days after END), 5 to be
+    removed.  The cabinet itself moves 1 to 2 at START and 2 to 3 at END;
+    4 and 5 only ever come from the server."""
+    now = now or int(time.time())
+    if now < t["start"]:
+        return 1
+    if now < t["end"]:
+        return 2
+    if now < t["end"] + t.get("final_days", 7) * 86400:
+        return 4
+    return 5
+
+
+def tournament_body(t, status):
     """0x0021, 498-byte body (MEGACDLL 0x9d668 -> tourney.dbf)."""
     now = int(time.time())
-    b = struct.pack("<IIIiiII", t["id"], t["game"], t["status"], t["start"] - now,
+    b = struct.pack("<IIIiiII", t["id"], t["game"], status, t["start"] - now,
                     t["end"] - now, t["credits"], t["gameopts"])
     b += cstr(t["name"], 51) + cstr(t["desc"], 101)
     b += struct.pack("<II", t["randseed"], t["seedinc"])
@@ -224,8 +239,34 @@ class TournaMaxx:
         return self.say(0x0011, what="hello")
 
     def next_tournament(self):
-        t = self.pending.pop(0)
-        return self.say(0x0021, tournament_body(t), "tournament %d, %r" % (t["id"], t["name"]))
+        t, status = self.pending.pop(0)
+        return self.say(0x0021, tournament_body(t, status),
+                        "tournament %d, %r, status %d" % (t["id"], t["name"], status))
+
+    def delivered(self, kind, tid):
+        """Whether this cabinet has had tournament tid's final (kind "final")
+        or removal ("removed") already; the state file remembers."""
+        return self.serial in STATE.setdefault(kind, {}).get(str(tid), [])
+
+    def mark(self, kind, tid):
+        STATE.setdefault(kind, {}).setdefault(str(tid), []).append(self.serial)
+        save_state()
+
+    def closing(self):
+        """After the rankings: STATUS 4 for tournaments that have ended (the
+        cabinet archives their rows into SC<id>.dbf, which the winners
+        screen reads, so the final rankings have to be in first), STATUS 5
+        for those whose winners have been shown long enough."""
+        todo = []
+        for t in STATE["tournaments"]:
+            st = tournament_status(t)
+            if st == 4 and not self.delivered("final", t["id"]):
+                todo.append((t, 4))
+                self.mark("final", t["id"])
+            elif st == 5 and not self.delivered("removed", t["id"]):
+                todo.append((t, 5))
+                self.mark("removed", t["id"])
+        return todo
 
     def register(self, body):
         """0x0052 with a player: give them a permanent ID.  The answer is the
@@ -275,7 +316,14 @@ class TournaMaxx:
         here = {k for k, p in players.items() if p.get("cabinet") == self.serial}
         states = {players[k].get("state") for k in here}
         entries = []
-        for tid in sorted({k[0] for k in best}):
+        # Standings go out while a tournament runs, and once more with its
+        # final; after that the cabinet keeps them in SC<id>.dbf.
+        live = set()
+        for t in STATE["tournaments"]:
+            st = tournament_status(t)
+            if st in (1, 2) or (st == 4 and not self.delivered("final", t["id"])):
+                live.add(t["id"])
+        for tid in sorted({k[0] for k in best} & live):
             field = [(sum(sc), pid, sc) for (t, pid), sc in best.items() if t == tid]
             field.sort(key=lambda x: -x[0])
             for group in range(3):
@@ -311,14 +359,21 @@ class TournaMaxx:
             # its new players, its scores; then COMPLETE.
             if t == 0x0012:
                 self.serial = ctext(body[2:16])   # the machine serial
-            if t == 0x0012 and self.port == 17751 and STATE["tournaments"]:
-                self.pending = list(STATE["tournaments"])
-                out += self.next_tournament()
-            elif t == 0x0012 and self.port != 17751:
+            if t == 0x0012 and self.port != 17751:
                 out += self.say(0xFF01, b"COMPLETE.\0", "COMPLETE.")
+            elif t == 0x0012:
+                # Announced and running tournaments go out first.
+                self.pending = [(x, tournament_status(x)) for x in STATE["tournaments"]
+                                if tournament_status(x) in (1, 2)]
+                if self.pending:
+                    out += self.next_tournament()
+                else:
+                    out += self.say(0x0041, what="which tournaments?")
             elif t == 0x0022 and self.pending:
                 out += self.next_tournament()
-            elif t in (0x0012, 0x0022):
+            elif t == 0x0022 and self.reports is not None:
+                out += self.next_report()        # the closing 0x0021s are done
+            elif t == 0x0022:
                 out += self.say(0x0041, what="which tournaments?")
             elif t == 0x0042:
                 # Players registered at the cabinet come up one per 0x0051;
@@ -340,11 +395,11 @@ class TournaMaxx:
                 if ranks:
                     out += ranks
                 else:
-                    out += self.next_report()
+                    out += self.after_rankings()
             elif t == 0x0074:
                 self.rank_msgs -= 1
                 if self.rank_msgs <= 0:
-                    out += self.next_report()
+                    out += self.after_rankings()
             elif self.reports is not None and self.asked:
                 # Report answers are kept (a request may bring more than one
                 # message); the answer to the current request moves on.
@@ -354,6 +409,14 @@ class TournaMaxx:
                 if t in (self.asked + 1, 0xFF02):
                     out += self.next_report()
         return out
+
+    def after_rankings(self):
+        """Finals and removals (each 0x0021 answered by 0x0022), then the
+        reports."""
+        self.pending = self.closing()
+        if self.pending:
+            return self.next_tournament()
+        return self.next_report()
 
     def next_report(self):
         """Read-only questions asked at the end of an update call; then
