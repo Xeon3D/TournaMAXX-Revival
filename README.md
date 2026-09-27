@@ -74,6 +74,10 @@ and set `TMX_SECURE_COOKIES=true` when it is.
 
 To build it yourself: `docker build -t tournamaxx-revival .`
 
+Each GitHub release publishes the image
+(`.github/workflows/docker.yml`): a release tagged `v1.2.3` is pushed as
+`1.2.3`, `1.2` and `latest`.
+
 ## On a server: `deploy/`
 
 `deploy/install.sh` sets it all up on Debian or Ubuntu, as root, from a copy
