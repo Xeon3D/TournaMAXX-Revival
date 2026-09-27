@@ -32,6 +32,8 @@ import socket
 import struct
 import sys
 import threading
+import time
+import json
 
 OUR_IP  = bytes([10, 0, 2, 2])
 PEER_IP = bytes([10, 0, 2, 15])
@@ -102,6 +104,266 @@ def ip_packet(proto, src, dst, payload, ident=0):
 
 def dotted(b):
     return ".".join(str(x) for x in b)
+
+
+def cstr(s, n):
+    b = s.encode("latin1")[:n - 1]
+    return b + b"\0" * (n - len(b))
+
+
+def ctext(b):
+    return b.split(b"\0")[0].decode("latin1")
+
+
+# ------------------------------------------------------------ TournaMAXX state
+#
+# What the server knows between calls lives in a JSON file next to the log
+# (--state): the tournaments it hands out, the players it has given permanent
+# IDs to, and every score the cabinets have uploaded.  Delete the file to
+# start again.
+
+STATE = None
+STATE_PATH = None
+
+
+def default_state():
+    now = int(time.time())
+    return {
+        "next_player_id": 1001,
+        # GAME is the game's number in the cabinet's launcher (MEGACDLL
+        # 0x55dc0): 48 Wild 8, 13 Zip 21, 15 Quick Match.  Times are Unix
+        # times; the cabinet is sent them as seconds from now.
+        "tournaments": [
+            dict(id=1, game=48, status=2, start=now - 3600, end=now + 7 * 86400,
+                 credits=1, gameopts=0, name="MEGAPPBOX TEST",
+                 desc="A test tournament from tools/modem-server.py",
+                 randseed=12345, seedinc=1,
+                 groups=["NATIONAL", "REGIONAL", "LOCAL"],
+                 prizes=["FIRST PRIZE", "SECOND PRIZE", "THIRD PRIZE"],
+                 showdate=now - 3600),
+        ],
+        "players": {},      # permanent id -> what the cabinet sent
+        "scores": [],       # every uploaded score entry
+    }
+
+
+def load_state(path):
+    global STATE, STATE_PATH
+    STATE_PATH = path
+    try:
+        with open(path, encoding="utf-8") as f:
+            STATE = json.load(f)
+    except (OSError, ValueError):
+        STATE = default_state()
+        save_state()
+
+
+def save_state():
+    with LOCK:
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(STATE, f, indent=1)
+
+
+def tournament_body(t):
+    """0x0021, 498-byte body (MEGACDLL 0x9d668 -> tourney.dbf)."""
+    now = int(time.time())
+    b = struct.pack("<IIIiiII", t["id"], t["game"], t["status"], t["start"] - now,
+                    t["end"] - now, t["credits"], t["gameopts"])
+    b += cstr(t["name"], 51) + cstr(t["desc"], 101)
+    b += struct.pack("<II", t["randseed"], t["seedinc"])
+    b += b"".join(cstr(g, 51) for g in t["groups"])
+    b += b"".join(cstr(p, 51) for p in t["prizes"])
+    b += struct.pack("<i", t["showdate"] - now)
+    assert len(b) == 0x1F6 - 4, len(b)
+    return b
+
+
+# Read-only questions asked at the end of an update call.  An empty 0x0201,
+# 0x0211 or 0x0221 reads a settings block (with a body it would set it);
+# 0x00C1 and 0x00E1 are reports.  0x00C9 is left out: the cabinet clears the
+# counters it reports.
+REPORTS = [
+    (0x0201, "operator settings?"),
+    (0x0211, "per-game settings?"),
+    (0x0221, "dial-up settings?"),
+    (0x00C1, "game statistics?"),
+    (0x00E1, "report E1?"),
+]
+
+
+class TournaMaxx:
+    """The TournaMAXX server end, as far as it is known (DOS MAXX, Emerald 2).
+
+    Messages both ways are [type u16][length u16][body], little-endian, the
+    length counting the 4-byte header.  The server speaks first and drives;
+    the cabinet answers each command with the next type up.  See
+    docs/tournamaxx.md.  Port 15000 is the Initial Connection (no databases
+    open: login and COMPLETE only); port 17751 (0x4557) is the update call.
+    """
+
+    def __init__(self, name, port=15000):
+        self.name = name
+        self.port = port
+        self.buf = b""
+        self.pending = []
+        self.serial = ""
+        self.rank_msgs = 0
+        self.reports = None
+        self.asked = 0
+
+    @staticmethod
+    def msg(t, body=b""):
+        return struct.pack("<HH", t, 4 + len(body)) + body
+
+    def say(self, t, body=b"", what=""):
+        log(self.name, "  TournaMAXX: -> %04X %s" % (t, what))
+        return self.msg(t, body)
+
+    def opened(self):
+        log(self.name, "  TournaMAXX (port %d): hello" % self.port)
+        return self.say(0x0011, what="hello")
+
+    def next_tournament(self):
+        t = self.pending.pop(0)
+        return self.say(0x0021, tournament_body(t), "tournament %d, %r" % (t["id"], t["name"]))
+
+    def register(self, body):
+        """0x0052 with a player: give them a permanent ID.  The answer is the
+        cabinet's own record back as 0x0051, with the ID at +4 (MEGACDLL
+        0x9db94 writes it over the player's temporary one)."""
+        temp = struct.unpack("<I", body[0:4])[0]
+        pid = STATE["next_player_id"]
+        STATE["next_player_id"] += 1
+        STATE["players"][str(pid)] = {
+            "tempid": temp, "cabinet": self.serial,
+            "handle": ctext(body[0x08:0x15]), "city": ctext(body[0x1A:0x39]).strip(),
+            "state": ctext(body[0x39:0x5D]).strip(), "raw": body.hex()}
+        save_state()
+        log(self.name, "  player: temporary %d -> permanent %d" % (temp, pid))
+        reply = struct.pack("<I", pid) + body[4:]
+        return self.say(0x0051, reply, "player %d" % pid)
+
+    def store_scores(self, body):
+        for i in range(0, len(body) - 51, 52):
+            e = body[i:i + 52]
+            tourn, player, newplays = struct.unpack("<III", e[0:12])
+            scores = list(struct.unpack("<5I", e[12:32]))
+            dates = list(struct.unpack("<5I", e[32:52]))
+            STATE["scores"].append(dict(tournament=tourn, player=player, newplays=newplays,
+                                        scores=scores, dates=dates, at=int(time.time()),
+                                        cabinet=self.serial))
+            log(self.name, "  score: tournament %d, player %d, %d new plays, scores %s" %
+                (tourn, player, newplays, scores))
+        save_state()
+
+    def rankings(self):
+        """0x0073 messages: every tournament's standings, in the three groups
+        the cabinet shows (0 National: everyone; 1 Regional: players of the
+        same state as this cabinet's; 2 Local: players of this cabinet).
+        Entry, 34 bytes (MEGACDLL 0x9ea94): u16 group, u32 tournament,
+        u32 player, u32 rank, u32 score[5] (the total is their sum).  At most
+        60 entries a message."""
+        # A cabinet uploads only the scores played since its last call (the
+        # rankings it is sent replace its own table), so a player's standing
+        # is their best five over every upload.  The cabinet shows the total
+        # divided by five.
+        allsc = {}
+        for s in STATE["scores"]:
+            allsc.setdefault((s["tournament"], s["player"]), []).extend(x for x in s["scores"] if x)
+        best = {k: (sorted(v, reverse=True) + [0] * 5)[:5] for k, v in allsc.items()}
+        players = STATE["players"]
+        here = {k for k, p in players.items() if p.get("cabinet") == self.serial}
+        states = {players[k].get("state") for k in here}
+        entries = []
+        for tid in sorted({k[0] for k in best}):
+            field = [(sum(sc), pid, sc) for (t, pid), sc in best.items() if t == tid]
+            field.sort(key=lambda x: -x[0])
+            for group in range(3):
+                rank = 0
+                for total, pid, sc in field:
+                    p = players.get(str(pid), {})
+                    if group == 1 and p.get("state") not in states:
+                        continue
+                    if group == 2 and str(pid) not in here:
+                        continue
+                    rank += 1
+                    entries.append(struct.pack("<HIII5I", group, tid, pid, rank, *sc))
+        out = b""
+        for i in range(0, len(entries), 60):
+            chunk = entries[i:i + 60]
+            out += self.say(0x0073, b"".join(chunk), "rankings (%d entries)" % len(chunk))
+        return out, (len(entries) + 59) // 60
+
+    def received(self, data):
+        self.buf += data
+        out = b""
+        while len(self.buf) >= 4:
+            t, n = struct.unpack("<HH", self.buf[:4])
+            if n < 4 or len(self.buf) < n:
+                break
+            m, self.buf = self.buf[:n], self.buf[n:]
+            body = m[4:]
+            txt = "".join(chr(x) if 32 <= x < 127 else "." for x in body)
+            log(self.name, "  TournaMAXX: <- %04X, %d bytes: %s" % (t, n, body.hex(" ")))
+            log(self.name, "              as text: %s" % txt)
+
+            # The update call: tournaments out, then what the cabinet holds,
+            # its new players, its scores; then COMPLETE.
+            if t == 0x0012:
+                self.serial = ctext(body[2:16])   # the machine serial
+            if t == 0x0012 and self.port == 17751 and STATE["tournaments"]:
+                self.pending = list(STATE["tournaments"])
+                out += self.next_tournament()
+            elif t == 0x0012 and self.port != 17751:
+                out += self.say(0xFF01, b"COMPLETE.\0", "COMPLETE.")
+            elif t == 0x0022 and self.pending:
+                out += self.next_tournament()
+            elif t in (0x0012, 0x0022):
+                out += self.say(0x0041, what="which tournaments?")
+            elif t == 0x0042:
+                # Players registered at the cabinet come up one per 0x0051;
+                # the empty 0x0052 that ends them also readies the first
+                # score batch, so 0x0067 has to come after.
+                out += self.say(0x0051, what="new players?")
+            elif t == 0x0052 and n > 4:
+                out += self.register(body)
+            elif t == 0x0052:
+                out += self.say(0x0067, what="scores?")
+            elif t == 0x0068 and n > 4:
+                self.store_scores(body)
+                out += self.say(0x0067, what="more scores?")
+            elif t == 0x0068:
+                # Scores are in: send the standings (each 0x0073 answered by
+                # an empty 0x0074), then COMPLETE.
+                ranks, self.rank_msgs = self.rankings()
+                self.reports = list(REPORTS)
+                if ranks:
+                    out += ranks
+                else:
+                    out += self.next_report()
+            elif t == 0x0074:
+                self.rank_msgs -= 1
+                if self.rank_msgs <= 0:
+                    out += self.next_report()
+            elif self.reports is not None and self.asked:
+                # Report answers are kept (a request may bring more than one
+                # message); the answer to the current request moves on.
+                STATE.setdefault("reports", {}).setdefault(self.serial, []).append(
+                    {"type": "%04X" % t, "at": int(time.time()), "raw": body.hex()})
+                save_state()
+                if t in (self.asked + 1, 0xFF02):
+                    out += self.next_report()
+        return out
+
+    def next_report(self):
+        """Read-only questions asked at the end of an update call; then
+        COMPLETE.  The answers are kept in the state file under "reports"."""
+        if self.reports:
+            self.asked, what = self.reports.pop(0)
+            return self.say(self.asked, what=what)
+        self.reports = None
+        self.asked = 0
+        return self.say(0xFF01, b"COMPLETE.\0", "COMPLETE.")
 
 
 class Session:
@@ -211,8 +473,8 @@ class Session:
     # Just enough TCP to let the cabinet open a connection and send: every
     # SYN is answered, every segment acknowledged and logged, a FIN answered.
     # Nothing is sent back -- what Merit's server said first is not known.
-    def tcp_send(self, src, sp, dst, dp, seq, ack, flags):
-        tcp = struct.pack("!HHIIBBHHH", sp, dp, seq & 0xFFFFFFFF, ack & 0xFFFFFFFF, 5 << 4, flags, 8192, 0, 0)
+    def tcp_send(self, src, sp, dst, dp, seq, ack, flags, payload=b""):
+        tcp = struct.pack("!HHIIBBHHH", sp, dp, seq & 0xFFFFFFFF, ack & 0xFFFFFFFF, 5 << 4, flags, 8192, 0, 0) + payload
         pseudo = src + dst + struct.pack("!BBH", 0, 6, len(tcp))
         tcp = tcp[:16] + struct.pack("!H", ip_checksum(pseudo + tcp)) + tcp[18:]
         self.send(PROTO_IP, ip_packet(6, src, dst, tcp))
@@ -225,7 +487,8 @@ class Session:
             self.conns.pop(key, None)
             return
         if flags & 2 and not flags & 16:                # SYN: accept
-            c = self.conns[key] = {"snd": 1000, "rcv": (seq + 1) & 0xFFFFFFFF, "bytes": 0}
+            c = self.conns[key] = {"snd": 1000, "rcv": (seq + 1) & 0xFFFFFFFF, "bytes": 0,
+                                   "open": False, "app": TournaMaxx(self.name, dp) if dp in (15000, 17751) else None}
             self.tcp_send(dst, dp, src, sp, c["snd"], c["rcv"], 0x12)
             c["snd"] += 1
             log(self.name, "  accepted %s:%d" % (dotted(dst), dp))
@@ -234,19 +497,32 @@ class Session:
         if c is None:
             self.tcp_send(dst, dp, src, sp, ack, seq + len(data), 0x14)
             return
+        reply = b""
+        if not c["open"] and flags & 16:                # handshake done
+            c["open"] = True
+            if c["app"]:
+                reply += c["app"].opened()
         if data and seq == c["rcv"]:
             c["rcv"] = (c["rcv"] + len(data)) & 0xFFFFFFFF
             c["bytes"] += len(data)
-            log(self.name, "  data from the cabinet (%d bytes): %s" % (len(data), data.hex(" ")))
-            txt = "".join(chr(x) if 32 <= x < 127 else "." for x in data)
-            log(self.name, "  as text: %s" % txt)
+            if c["app"]:
+                reply += c["app"].received(data)
+            else:
+                log(self.name, "  data from the cabinet (%d bytes): %s" % (len(data), data.hex(" ")))
+                txt = "".join(chr(x) if 32 <= x < 127 else "." for x in data)
+                log(self.name, "  as text: %s" % txt)
         if flags & 1:                                   # FIN
             c["rcv"] = (c["rcv"] + 1) & 0xFFFFFFFF
             self.tcp_send(dst, dp, src, sp, c["snd"], c["rcv"], 0x11)
             c["snd"] += 1
             log(self.name, "  the cabinet closed %s:%d after %d bytes" % (dotted(dst), dp, c["bytes"]))
             return
-        if data or flags & 1:
+        while reply:                                    # 512-byte segments
+            seg, reply = reply[:512], reply[512:]
+            self.tcp_send(dst, dp, src, sp, c["snd"], c["rcv"], 0x18, seg)
+            c["snd"] += len(seg)
+            data = b""
+        if data:
             self.tcp_send(dst, dp, src, sp, c["snd"], c["rcv"], 0x10)
 
     def dns(self, src, sp, dst, q):
@@ -328,8 +604,10 @@ def main():
     ap = argparse.ArgumentParser(description="A PPP answerer for MegaPPBox's modem.")
     ap.add_argument("--port", type=int, default=2323)
     ap.add_argument("--log", default="modem-server.log")
+    ap.add_argument("--state", default="modem-server-state.json")
     a = ap.parse_args()
     LOG = open(a.log, "a", encoding="utf-8")
+    load_state(a.state)
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

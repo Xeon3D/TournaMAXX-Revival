@@ -1,0 +1,259 @@
+# TournaMAXX protocol (DOS MAXX, Emerald 2 V9.01)
+
+Worked out from `MERIT2\EXEC\MEGACDLL.EXE` of MAXX Emerald 2 V9.01 (PG3002,
+SHA-256 `1e490ccd…2b4c`), decompiled with Ghidra, and from calls the game
+made to `tools/modem-server.py`. Addresses are that executable's (LE object 1
+at 0x10000, fixups applied). Emerald V8.04 speaks the same protocol at
+version 7.
+
+What is marked *verified* has been seen on the wire from the running game;
+the rest is read from the code.
+
+## Getting there
+
+1. The cabinet dials and runs PPP with its own TCP/IP stack (an InterNiche-
+   style stack inside the executable). ISP login `MERIT800@B-2000.NET` /
+   `CONSERVATION`; the dial settings in `C:\DIALINFO.*` are obfuscated, the
+   cabinet sends them decoded in its login. *Verified.*
+2. It resolves **`us.accessmerit.com`** (through 12.127.16.67). *Verified.*
+3. It opens TCP to that address, on one of two ports: *verified*
+   - **15000**, from *Initial Connection* (Dial-Up Network screen): login
+     only; the databases are not open, and a data command makes the cabinet
+     drop the line;
+   - **17751** (0x4557), from *Update from Server* and the daily update at
+     the hour ticked in the UPDATE grid: the full session. The session
+     object's mode field (+0x39) is this port number, and only at 0x4557 are
+     the tournament, player, score and location databases opened (0xa1dd4).
+4. The game's log (`C:\DEBUG.DAT`) calls this the *TournaMAXX Server*.
+
+Emerald 2 can also reach it over Ethernet (`ETHERNET\`, "Ethernet IP Address
+set to …").
+
+## Framing
+
+Every message, both ways, is
+
+    u16 type   u16 length   body[length - 4]
+
+little-endian, `length` counting the 4-byte header. The cabinet peeks the
+4-byte header, then reads `length` bytes. *Verified.*
+
+## Who talks
+
+The **server** drives. It sends an odd-numbered command; the cabinet runs its
+handler and answers with the next number up. The dispatcher (switch at
+0x9ced0) knows 25 types; anything else makes the cabinet send 0xFF02 and log
+"SERVER ERROR REPORTED".
+
+| Server sends | Handler | Cabinet answers | What it is |
+|---|---|---|---|
+| 0x0011 | 0x9d014 | 0x0012 | hello → login. *Verified.* |
+| 0x0021 | 0x9d668 | 0x0022 (empty) | a tournament. *Verified.* |
+| 0x0041 | 0x9d338 | 0x0042 | "which tournaments do you hold?" *Verified.* |
+| 0x0051 | 0x9db94 | 0x0052 | new players: empty = "next one?", with a body = "here is its permanent ID". *Verified.* |
+| 0x0067 | 0x9e98c | 0x0068 | score upload, one batch per request. *Verified.* |
+| 0x0073 | 0x9ea94 | 0x0074 (empty) | rankings. *Verified.* |
+| 0x0081 | 0x9e6bc | 0x0082 (empty) | players from elsewhere |
+| 0x00B1 | 0x9f9a8 | | resets thirteen counters (not yet understood) |
+| 0x00C1 | 0x9fab8 | 0x00C2 | game statistics |
+| 0x00C9 | 0xa0268 | | event counters (cleared once sent) |
+| 0x00D1 | 0xa2ccc | 0x00D2 (empty) | locations |
+| 0x00E1 | 0xa3034 | 0x00E2 | 14 × 14-byte per-game report |
+| 0x0101, 0x0103 | 0x9f2c4, 0x9f460 | 0x0102 / 0x0104 | the server fetches a file |
+| 0x0111, 0x0112 | 0x9f59c, 0x9f6d0 | 0x0113 / 0x0114 | the server sends a file |
+| 0x0121 | 0x9f8a4 | 0x0122 | a flag byte and a string (not yet understood) |
+| 0x0201 | 0xa07fc | 0x0202 | operator settings: read, or set then read |
+| 0x0211 | 0xa0d9c | 0x0212 | per-game settings: read, or set then read |
+| 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read |
+| 0x0A01 | 0xa2c20 | none | two short strings kept in memory |
+| 0x0A11 | 0xa2c6c | none | operator message, up to 1500 bytes of text, written to `D:\Database\Operate.txt` |
+| 0xFF01 | | 0xFF02 (empty) | status line; `COMPLETE.` ends the session. *Verified.* |
+| 0xFF11 | 0x9d2c8 | 0xFF02 | acknowledgment only |
+
+Status lines the cabinet knows: `COMPLETE.`, `SERVER ERROR.`,
+`INVALID MACHINE SERIAL NUMBER.`, `NO MACHINE SERIAL NUMBER.`,
+`INVALID KEY.`, `COMMUNICATIONS VERSION MISMATCH.`
+
+### An update session
+
+What `modem-server.py` does, and the cabinet accepts: *verified*
+
+    0011 hello            → 0012 login
+    0021 tournament  (×n) → 0022
+    0041                  → 0042 tournaments held
+    0051             (×n) → 0052 a new player → 0051 with its permanent ID …
+                          → 0052 empty (this also readies the first score batch)
+    0067             (×n) → 0068 scores … → 0068 empty
+    0073 rankings    (×n) → 0074
+    FF01 "COMPLETE."      → FF02, and the cabinet hangs up
+
+The order matters: 0x0067 before the empty 0x0052 makes the cabinet send an
+unprepared buffer (length 0xAAAA and whatever follows it in memory).
+
+## Messages
+
+### 0x0012 login (cabinet), 166 bytes at version 9. *Verified.*
+
+    +04 u16   protocol version (9; V8.04: 7)
+    +06 char  machine serial ("1234567")
+    +16 char  "supersecretpasswordthing"
+    …         key data, "10d62a81", the cabinet's clock, the access number,
+              the ISP login and password, the game's key id ("SA304801 R01")
+
+### 0x0021 tournament (server), 502 bytes. *Verified.*
+
+Written into `D:\Database\tourney.dbf`.
+
+    +004 u32  ID                  score file: D:\Database\SC<ID:06>.dbf
+    +008 u32  GAME                the launcher's game number (0x55dc0):
+                                  48 Wild 8, 13 Zip 21, 15 Quick Match, …
+    +00C u32  STATUS              2 = running (verified); 4 and 5 update an
+                                  existing tournament only, and 5 on one at 4
+                                  deletes it and its score file
+    +010 i32  START               seconds from now
+    +014 i32  END                 seconds from now
+    +018 u32  CREDITS             cost to play
+    +01C u32  GAMEOPTS
+    +020 char NAME[51]            shown as the EVENT
+    +053 char DESC[101]
+    +0B8 u32  RANDSEED            every cabinet deals the same
+    +0BC u32  SEEDINC
+    +0C0 char GROUP1..3[51] each
+    +159 char PRIZE1..3[51] each
+    +1F2 i32  SHOWDATE            seconds from now
+
+### 0x0042 tournaments held (cabinet), 142 bytes. *Verified.*
+
+    +04 u32   (session state)
+    +08 u32   (session state)
+    +0C char  LASTUPDT[9]    YYYYMMDD of the last tournament update, or "00000000"
+    +15 u8    count (up to 10)
+    +16 u32   ID[10]
+    +3E u32   TOTCREDITS[10]
+    +66 u32   TOTPLAYS[10]
+
+### 0x0052 new player (cabinet), 374 bytes. *Verified.*
+
+    +04 u32   TEMPID (the cabinet's own, e.g. 9999999)
+    +08 u32
+    +0C char  HANDLE[13]
+    +19 char  PIN[5]
+    +1E char  CITY[31]
+    +3D char  STATE[36]
+    +61 …     DATEADDED, LASTUPDATE, BIRTHDAY (YYYYMMDD), FIRSTNAME,
+              LASTNAME, ADDRESS, POSTALCODE, COUNTRY, PHONE, EMAIL, …
+
+The server answers with 0x0051 carrying the same record, the permanent player
+ID at +04; the cabinet renumbers the player, and their scores, to it.
+*Verified.* An empty 0x0052 means no new players are left.
+
+### 0x0068 score upload (cabinet). *Verified.*
+
+Up to 38 entries of 52 bytes, only records marked DIRTY; an empty 0x0068
+(length 4) means nothing is left. A cabinet uploads only the scores played
+since it was last sent rankings.
+
+    +00 u32   TOURNID
+    +04 u32   PLAYERID
+    +08 u32   NEWPLAYS
+    +0C u32   the new scores (up to five, best first)
+    +20 u32   their dates (time_t)
+
+### 0x0073 rankings (server). *Verified.*
+
+The cabinet answers 0x0074 at once. The rankings replace the cabinet's own
+score table. Up to 60 entries of 34 bytes:
+
+    +00 u16   group: 0 National, 1 Regional, 2 Local
+    +02 u32   TOURNID
+    +06 u32   PLAYERID
+    +0A u32   RANK
+    +0E u32   the player's five scores
+
+The ranking screens show the sum of the five divided by five. The handle,
+city and state come from the cabinet's own player database (so players it
+does not know need 0x0081 first).
+
+### 0x0081 players from elsewhere (server)
+
+Entries of 97 bytes; the cabinet answers 0x0082 first.
+
+    +00 u32   player ID (0: skipped)
+    +04 u32
+    +08 char  HANDLE[13]
+    +15 char  PIN[5]
+    +1A char  CITY[31]
+    +39 char  STATE[36]
+    +5D u32   LOCATION
+
+An empty HANDLE or PIN deletes the player.
+
+### 0x00D1 locations (server)
+
+Entries of 154 bytes, into `location.dbf` (ID, NAME, CITY, STATE, COUNTRY);
+the cabinet answers 0x00D2.
+
+### File transfer
+
+The first transfer of a session closes the databases and deletes their `.bak`
+copies, so a database file can be replaced whole. Finished transfers are
+logged in `C:\MERIT2\N_TOURN\USER\XFERLOG.TXT`.
+
+The server fetches a file:
+
+    0101  +05 path                      → 0104 (cannot open)  or
+                                        → 0102 first chunk
+    0102  (cabinet, 1996 bytes) +04 offset, +08 file size, +0C bytes in this
+          chunk, +10 data
+    0103                                → 0102 next chunk; 0 bytes: the end
+
+The server sends a file:
+
+    0111  +05 destination path          → 0113 ready (C:\FTPTEMP.DAT opened) / 0114
+    0112  +08 file size, +0C bytes in this chunk, +10 data
+                                        → 0113; a chunk of 0 bytes ends it: the
+                                          temporary file is renamed to the
+                                          destination (0114 if that fails)
+
+### Settings
+
+An empty 0x0201 / 0x0211 / 0x0221 reads a block; with a body it is written
+first, then read back.
+
+- **0x0202** (285 bytes): operator settings: flags, volume, TournaMAXX
+  options, and the list of games switched on (84 game slots).
+- **0x0212** (172 bytes): a 4-bit setting for each of the 84 games.
+- **0x0222** (315 bytes): the Dial-Up Network screen: six strings (access
+  number, login, password, server …), two IP addresses as text at +117 and
+  +127, and the UPDATE hour (0–23) at +137.
+
+### Reports
+
+- **0x00C2**: game statistics: per game, 23 bytes (game number, category,
+  share of play, plays in bands), for two periods, with totals and dates.
+- **0x00C9**'s answer: 14-byte records: an event code, an index, three
+  counters. The cabinet clears these once sent.
+- **0x00E2**: 14 entries of 14 bytes.
+
+## The cabinet's databases (dBase III, `D:\Database\`)
+
+- **player.dbf**: ID N8, TEMPID N8, HANDLE C12, PIN C4, LOCATION N8, MODIFY N8,
+  FIRSTNAME C20, LASTNAME C20, ADDRESS C30, CITY C30, STATE C35,
+  POSTALCODE C16, COUNTRY C30, PHONE C20, BIRTHDAY D8, EMAIL C50,
+  DATEADDED D8, LASTUPDATE D8, OPTIONAL C50, SEX C1, LANGUAGE N8, DUMMY C32
+- **tourney.dbf**: ID N8, GAME N8, NAME C50, DESC C100, STATUS N8,
+  LASTUPDT D8, START N8, END N8, CREDITS N8, TOTPLAYS N8, TOTCREDITS N8,
+  GAMEOPTS N8, RANDSEED N8, SEEDINC N8, PRIZE1-3 C50, GROUP1-3 C50,
+  SHOWDATE C8, DUMMY C24
+- **scores.dbf / SC<id>.dbf**: DIRTY C1, TOURNID N8, PLAYERID N8, NEWPLAYS N8,
+  NUMPLAYS N8, LANGUAGE N8, HANDLE C12, CITY C30, STATE C35, LOCATION C51,
+  TOTAL1-3 N8, RANK1-3 N8, SCORE11-35 N8 (three groups × five), SCDATE1-5 C11,
+  DUMMY C32
+- **location.dbf**: ID N8, NAME C51, CITY C30, STATE C35, COUNTRY C30, DUMMY C32
+
+## Still open
+
+- 0x00B1, 0x0121 and 0x0A01: what they are for.
+- The exact layouts of 0x0202, 0x0212, 0x00C2, 0x00E2 and 0x00C9's answer.
+- The STATUS values other than 2, 4 and 5.
+- The Linux MAXX releases (Ruby onward), which have their own client.
