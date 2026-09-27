@@ -446,6 +446,15 @@ be edited while the server runs, and each call reads it again if it changed
   (after the delete flag) as one stream: PC1 with the 10-byte key
   "M@xxR0cks!", where the round index never advances (MEGACDLL V8.04
   0x93fb0). TouchPPBox `scripts/p14-dbfcrypt.py` decodes them.
+- **Update packages.** At boot a cabinet's TEST.BAT runs
+  `C:\NetUpdt.exe -d -o c:\` (a PKZIP self-extractor), then `C:\NetUpdt.bat`,
+  and deletes each: that is how Merit shipped network updates. The server's
+  "updates" send such a file with 0x0111/0x0112, reboot with an empty-path
+  0x0121 (which only reboots), and fetch a result file on the next call.
+  The Emerald V8.04 date fix goes this way as one 735 KB PKSFX (the exe alone
+  is 1.7 MB); its batch file installs the new exe only if the old and new
+  ones are both 1,713,893 bytes. Tested: a cabinet running the original exe
+  reported "TMFIX-804 INSTALLED".
 
 ## Still open
 
