@@ -45,7 +45,12 @@ PROTO_LCP  = 0xC021
 PROTO_IPCP = 0x8021
 
 LOG = None
-LOCK = threading.Lock()
+# One lock for everything the calls share: the state, the state file and the
+# log.  Each PPP frame is handled whole under it (a few milliseconds), so
+# calls that are on line at the same time take turns and never interleave
+# half way through a change -- two cabinets registering players at once get
+# different IDs.  Re-entrant: log() and save_state() take it again.
+LOCK = threading.RLock()
 
 
 def log(conn, msg):
@@ -915,7 +920,8 @@ class Session:
                         text.clear()
                     self.ppp_seen = True
                     if buf:
-                        self.handle_frame(bytes(buf))
+                        with LOCK:
+                            self.handle_frame(bytes(buf))
                     buf.clear()
                     esc = False
                 elif not self.ppp_seen:
