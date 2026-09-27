@@ -71,7 +71,7 @@ No game files are included here: the fix is made from your own copy.
 
 ## Licence
 
-GPL-3.0; see [LICENSE](LICENSE).
+GPL-2.0, like MegaPPBox; see [LICENSE](LICENSE).
 
 The PKSFX 2.04g self-extractor stub carried in `mkupdate.py` (and so in every
 package it makes) is PKWARE's code, not covered by the GPL. PKWARE's PKZIP
