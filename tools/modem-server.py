@@ -273,6 +273,11 @@ class TournaMaxx:
         self.box_data = b""
         self.box_pos = 0
         self.box_done = False
+        # What this call has delivered, as (kind, key) pairs: kept only once
+        # the cabinet answers COMPLETE with 0xFF02.  A call that breaks off
+        # is rolled back by the cabinet (Emerald V8.04 restores its
+        # databases), so everything in it has to go again next time.
+        self.uncommitted = []
 
     @staticmethod
     def msg(t, body=b""):
@@ -288,16 +293,35 @@ class TournaMaxx:
 
     def next_tournament(self):
         t, status = self.pending.pop(0)
+        if status in (1, 2):
+            self.mark("had", t["id"])
         return self.say(0x0021, tournament_body(t, status),
                         "tournament %d, %r, status %d" % (t["id"], t["name"], status))
 
-    def delivered(self, kind, tid):
-        """Whether this cabinet has had tournament tid's final (kind "final")
-        or removal ("removed") already; the state file remembers."""
-        return self.serial in STATE.setdefault(kind, {}).get(str(tid), [])
+    def delivered(self, kind, key):
+        """Whether this cabinet has had key already: tournament key announced
+        or running (kind "had"), its final ("final") or removal
+        ("removed"), or player key (kind "players_sent", by serial)."""
+        if (kind, str(key)) in self.uncommitted:
+            return True
+        if kind == "players_sent":
+            return str(key) in STATE.get(kind, {}).get(self.serial, [])
+        return self.serial in STATE.get(kind, {}).get(str(key), [])
 
-    def mark(self, kind, tid):
-        STATE.setdefault(kind, {}).setdefault(str(tid), []).append(self.serial)
+    def mark(self, kind, key):
+        if not self.delivered(kind, key):
+            self.uncommitted.append((kind, str(key)))
+
+    def commit(self):
+        """The cabinet said COMPLETE: what this call delivered is kept."""
+        for kind, key in self.uncommitted:
+            if kind == "players_sent":
+                STATE.setdefault(kind, {}).setdefault(self.serial, []).append(key)
+            else:
+                STATE.setdefault(kind, {}).setdefault(key, []).append(self.serial)
+        if self.uncommitted:
+            log(self.name, "  TournaMAXX: kept %d deliveries" % len(self.uncommitted))
+        self.uncommitted = []
         save_state()
 
     def closing(self):
@@ -308,6 +332,8 @@ class TournaMaxx:
         todo = []
         for t in STATE["tournaments"]:
             st = tournament_status(t)
+            if not self.delivered("had", t["id"]):
+                continue            # never here: a final for it stalls V8.04
             if st == 4 and not self.delivered("final", t["id"]):
                 todo.append((t, 4))
                 self.mark("final", t["id"])
@@ -407,6 +433,8 @@ class TournaMaxx:
             # its new players, its scores; then COMPLETE.
             if t == 0x0012:
                 self.serial = ctext(body[2:16])   # the machine serial
+            if t == 0xFF02:
+                self.commit()
             if t == 0x0012 and self.port != 17751:
                 # Initial Connection: the registration Merit holds for the
                 # site, which SETUP.DLL shows with "IS THE FOLLOWING
@@ -493,9 +521,8 @@ class TournaMaxx:
         rankings.  Entries of 97 bytes (MEGACDLL 0x9e6bc): u32 ID, then the
         player's record as their own cabinet sent it (from +4: u32, HANDLE,
         PIN, CITY, STATE), u32 LOCATION.  The cabinet answers 0x0082."""
-        sent = STATE.setdefault("players_sent", {}).setdefault(self.serial, [])
         todo = [(pid, p) for pid, p in STATE["players"].items()
-                if p.get("cabinet") != self.serial and pid not in sent]
+                if p.get("cabinet") != self.serial and not self.delivered("players_sent", pid)]
         if not todo:
             return b""
         todo = todo[:20]                      # 20 × 97 bytes fit a message
@@ -503,8 +530,7 @@ class TournaMaxx:
         for pid, p in todo:
             raw = bytes.fromhex(p["raw"])
             body += struct.pack("<I", int(pid)) + raw[4:0x5D] + struct.pack("<I", 0)
-            sent.append(pid)
-        save_state()
+            self.mark("players_sent", pid)
         return self.say(0x0081, body, "%d players from other cabinets" % len(todo))
 
     def after_rankings(self):

@@ -418,6 +418,23 @@ be edited while the server runs, and each call reads it again if it changed
   DUMMY C32
 - **location.dbf**: ID N8, NAME C51, CITY C30, STATE C35, COUNTRY C30, DUMMY C32
 
+## Older releases
+
+- **Emerald V8.04** (protocol 7, a 146-byte login) handles the same commands
+  as Emerald 2, plus **0x0071**, an older rankings message: up to 20 entries
+  of 92 bytes (u32 tournament, u32 player, u32 rank[3], u32 [3] per group,
+  u32 score[3][5]), answered 0x0072. It fills the same ranking rows as 0x0073,
+  so the server doesn't need it.
+- A ranking row whose player isn't in the cabinet's player database is shown
+  as "PLAYER" (0x0073 at 0x9cea4; 0x0071 uses "Player" / "Network" / "Earth").
+  The names come from 0x0081, which has to come before the rankings.
+- A call that breaks off before COMPLETE is rolled back by the cabinet, so the
+  server keeps what a call delivered (players, finals, removals) only once
+  0xFF02 arrives.
+- A final (status 4) for a tournament the cabinet never had gets no 0x0022
+  from V8.04, and the call hangs until the cabinet gives up. The server sends
+  finals and removals only to cabinets that had the tournament.
+
 ## Still open
 
 - 0x00B1's thirteen option bytes.
