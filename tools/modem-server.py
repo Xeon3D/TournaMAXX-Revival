@@ -410,13 +410,28 @@ class TournaMaxx:
                     out += self.next_report()
         return out
 
+    def location(self):
+        """0x00B1 (no answer): the cabinet's LOCATION INFO screen (NAME, CITY
+        STATE, COUNTRY, TELEPHONE #), kept in C:\\NTNVRAM.DAT.  Four strings
+        of 51 at +11, +44, +77, +AA; the thirteen option bytes before them
+        are only stored when below 3, so 0xFF leaves them as they are.  The
+        text comes from the state file's "locations", by machine serial."""
+        loc = STATE.setdefault("locations", {}).setdefault(self.serial, {
+            "name": "MEGAPPBOX CABINET", "city_state": "SET IN modem-server-state.json",
+            "country": "", "telephone": ""})
+        save_state()
+        body = b"\xff" * 13 + b"".join(
+            cstr(loc.get(k, ""), 51) for k in ("name", "city_state", "country", "telephone"))
+        return self.say(0x00B1, body, "location %r" % loc.get("name"))
+
     def after_rankings(self):
-        """Finals and removals (each 0x0021 answered by 0x0022), then the
-        reports."""
+        """The location, finals and removals (each 0x0021 answered by
+        0x0022), then the reports."""
+        out = self.location()
         self.pending = self.closing()
         if self.pending:
-            return self.next_tournament()
-        return self.next_report()
+            return out + self.next_tournament()
+        return out + self.next_report()
 
     def next_report(self):
         """Read-only questions asked at the end of an update call; then

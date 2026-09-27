@@ -54,18 +54,18 @@ handler and answers with the next number up. The dispatcher (switch at
 | 0x0067 | 0x9e98c | 0x0068 | score upload, one batch per request. *Verified.* |
 | 0x0073 | 0x9ea94 | 0x0074 (empty) | rankings. *Verified.* |
 | 0x0081 | 0x9e6bc | 0x0082 (empty) | players from elsewhere |
-| 0x00B1 | 0x9f9a8 | | resets thirteen counters (not yet understood) |
-| 0x00C1 | 0x9fab8 | 0x00C2 | game statistics |
+| 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and dial-up options, into `C:\NTNVRAM.DAT` |
+| 0x00C1 | 0x9fab8 | 0x00C2, 0x00C3 | game statistics, two periods. *Verified.* |
 | 0x00C9 | 0xa0268 | | event counters (cleared once sent) |
 | 0x00D1 | 0xa2ccc | 0x00D2 (empty) | locations |
-| 0x00E1 | 0xa3034 | 0x00E2 | 14 × 14-byte per-game report |
+| 0x00E1 | 0xa3034 | 0x00E2 | the last 14 calls. *Verified.* |
 | 0x0101, 0x0103 | 0x9f2c4, 0x9f460 | 0x0102 / 0x0104 | the server fetches a file |
 | 0x0111, 0x0112 | 0x9f59c, 0x9f6d0 | 0x0113 / 0x0114 | the server sends a file |
-| 0x0121 | 0x9f8a4 | 0x0122 | a flag byte and a string (not yet understood) |
-| 0x0201 | 0xa07fc | 0x0202 | operator settings: read, or set then read |
-| 0x0211 | 0xa0d9c | 0x0212 | per-game settings: read, or set then read |
-| 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read |
-| 0x0A01 | 0xa2c20 | none | two short strings kept in memory |
+| 0x0121 | 0x9f8a4 | 0x0122 | delete a file, and/or reboot after the call |
+| 0x0201 | 0xa07fc | 0x0202 | operator settings: read, or set then read. *Verified (read).* |
+| 0x0211 | 0xa0d9c | 0x0212 | per-game settings: read, or set then read. *Verified (read).* |
+| 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read. *Verified (read).* |
+| 0x0A01 | 0xa2c20 | none | the ISP login and password |
 | 0x0A11 | 0xa2c6c | none | operator message, up to 1500 bytes of text, written to `D:\Database\Operate.txt` |
 | 0xFF01 | | 0xFF02 (empty) | status line; `COMPLETE.` ends the session. *Verified.* |
 | 0xFF11 | 0x9d2c8 | 0xFF02 | acknowledgment only |
@@ -85,6 +85,10 @@ What `modem-server.py` does, and the cabinet accepts: *verified*
                           → 0052 empty (this also readies the first score batch)
     0067             (×n) → 0068 scores … → 0068 empty
     0073 rankings    (×n) → 0074
+    00B1 location               (no answer)
+    0021 finals      (×n) → 0022   tournaments that have ended: STATUS 4
+                                   (after their final rankings), later 5
+    0201, 0211, 0221, 00C1, 00E1   reports (read only)
     FF01 "COMPLETE."      → FF02, and the cabinet hangs up
 
 The order matters: 0x0067 before the empty 0x0052 makes the cabinet send an
@@ -107,9 +111,14 @@ Written into `D:\Database\tourney.dbf`.
     +004 u32  ID                  score file: D:\Database\SC<ID:06>.dbf
     +008 u32  GAME                the launcher's game number (0x55dc0):
                                   48 Wild 8, 13 Zip 21, 15 Quick Match, …
-    +00C u32  STATUS              2 = running (verified); 4 and 5 update an
-                                  existing tournament only, and 5 on one at 4
-                                  deletes it and its score file
+    +00C u32  STATUS              1 announced, 2 running, 3 ended (the
+                                  cabinet moves 1→2 at START and 2→3 at END,
+                                  0xa419c), 4 final, 5 remove. 4 and 5 only
+                                  update a tournament the cabinet has: 4
+                                  moves its rows from Scores.dbf into
+                                  SC<ID>.dbf, which the results read, so the
+                                  final rankings go first; 5 deletes it and
+                                  its SC file. 2 and 4 verified.
     +010 i32  START               seconds from now
     +014 i32  END                 seconds from now
     +018 u32  CREDITS             cost to play
@@ -193,6 +202,26 @@ An empty HANDLE or PIN deletes the player.
 Entries of 154 bytes, into `location.dbf` (ID, NAME, CITY, STATE, COUNTRY);
 the cabinet answers 0x00D2.
 
+### 0x00B1 location and dial-up options (server, no answer)
+
+Written into `C:\NTNVRAM.DAT`, which SETUP.DLL's LOCATION INFO screen reads
+(an empty string shows as `? ? ? ? ?`):
+
+    +04 u8[13] options; only values below 3 are stored, so 0xFF leaves one
+               as it is
+    +11 char   NAME[51]
+    +44 char   CITY STATE[51]
+    +77 char   COUNTRY[51]
+    +AA char   TELEPHONE #[51]
+
+### 0x0121 delete / reboot (server)
+
+    +04 u8    reboot at the end of the call ("TournaMAXX Server: Reboot
+              Requested" in DEBUG.DAT)
+    +05 char  a path to delete (empty: none); logged in XFERLOG.TXT
+
+With the file transfers below, this is how a cabinet's software is updated.
+
 ### File transfer
 
 The first transfer of a session closes the databases and deletes their `.bak`
@@ -218,22 +247,36 @@ The server sends a file:
 ### Settings
 
 An empty 0x0201 / 0x0211 / 0x0221 reads a block; with a body it is written
-first, then read back.
+first, then read back. *Reading verified.*
 
 - **0x0202** (285 bytes): operator settings: flags, volume, TournaMAXX
   options, and the list of games switched on (84 game slots).
 - **0x0212** (172 bytes): a 4-bit setting for each of the 84 games.
-- **0x0222** (315 bytes): the Dial-Up Network screen: six strings (access
-  number, login, password, server …), two IP addresses as text at +117 and
-  +127, and the UPDATE hour (0–23) at +137.
+- **0x0222** (315 bytes): the Dial-Up Network screen. *Verified:*
+
+      +004 char  modem init string   "AT&FE1V1&C1&D2S95=45S2=43S12=3S24=0"
+      +068 char  dial prefix
+      +073 char  access number        "0860008484"
+      +09C char  ISP login            "MERIT800@B-2000.NET"
+      +0C5 char  ISP password         "CONSERVATION"
+      +0EE char  server               "us.accessmerit.com"
+      +117 char  DNS 1 (text)         "12.127.16.67"
+      +127 char  DNS 2 (text)         "12.127.17.71"
+      +137 u8    UPDATE hour, 0–23    15
+      +138 u8 ×3 (options)
+
+- **0x0A01** (no answer) sets the ISP login (+04) and password (+68), when the
+  cabinet uses Merit's own ISP account.
 
 ### Reports
 
-- **0x00C2**: game statistics: per game, 23 bytes (game number, category,
-  share of play, plays in bands), for two periods, with totals and dates.
+- **0x00C2 / 0x00C3**: game statistics, one message per period (current and
+  previous): a 54-byte header (totals, the period's year and month), then per
+  game 23 bytes (game number, category, share of play, plays in bands).
 - **0x00C9**'s answer: 14-byte records: an event code, an index, three
   counters. The cabinet clears these once sent.
-- **0x00E2**: 14 entries of 14 bytes.
+- **0x00E2**: the last 14 calls, 14 bytes each: u32 start, u32 end (time_t),
+  u8 status, u8 error code, … *Verified.*
 
 ## The cabinet's databases (dBase III, `D:\Database\`)
 
@@ -253,7 +296,6 @@ first, then read back.
 
 ## Still open
 
-- 0x00B1, 0x0121 and 0x0A01: what they are for.
-- The exact layouts of 0x0202, 0x0212, 0x00C2, 0x00E2 and 0x00C9's answer.
-- The STATUS values other than 2, 4 and 5.
+- The meaning of each byte in 0x0202, 0x0212 and 0x00B1's options, and of
+  0x00C9's event codes.
 - The Linux MAXX releases (Ruby onward), which have their own client.
