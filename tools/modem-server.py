@@ -394,7 +394,9 @@ class TournaMaxx:
                 out += self.next_tournament()
             elif t == 0x0022 and self.reports is not None:
                 out += self.run_outbox()         # the closing 0x0021s are done
-            elif self.box_item and t in (0x0102, 0x0104, 0x0113, 0x0114, 0x0122):
+            elif self.box_item and (t in (0x0102, 0x0104, 0x0113, 0x0114, 0x0122, 0x0202,
+                                          0x0222, 0x00D2, 0xFF02)
+                                    or self.box_item.get("do") == "counters"):
                 out += self.outbox_answer(t, body)
             elif t == 0x0022:
                 out += self.say(0x0041, what="which tournaments?")
@@ -525,9 +527,70 @@ class TournaMaxx:
                 self.box_data = b""
                 body = b"\0" + item["path"].encode("latin1") + b"\0"
                 return out + self.say(0x0101, body, "fetch %s" % item["path"])
+            if what == "settings":
+                # 0x0201 with a body: the last 0x0202 this cabinet sent,
+                # with the bytes named in "set" ({"+0A": 30, ...}, message
+                # offsets) changed.  +15 is the start of the game list:
+                # 0xFF there leaves the games alone.
+                base = self.last_report("0202")
+                if base is None:
+                    self.box_item = None
+                    self.finish_item("no 0x0202 read yet")
+                    continue
+                b = bytearray(b"\0\0\0\0" + base[:0x11]) + b"\xff"
+                for k, v in item.get("set", {}).items():
+                    b[int(k.lstrip("+"), 16)] = int(v) & 0xFF
+                if "volume" in item:
+                    # +0A is a mixer level, 0-127; the operator menu shows it
+                    # as a percentage of 127, rounded down.
+                    b[0x0A] = min(127, max(1, -(-int(item["volume"]) * 127 // 100)))
+                return out + self.say(0x0201, bytes(b[4:]), "settings %s" % item.get("set"))
+            if what == "dialup":
+                # 0x0221 with a body: the last 0x0222, with fields changed.
+                base = self.last_report("0222")
+                if base is None:
+                    self.box_item = None
+                    self.finish_item("no 0x0222 read yet")
+                    continue
+                b = bytearray(b"\0\0\0\0" + base)
+                fields = {"init": (0x004, 100), "prefix": (0x068, 11), "phone": (0x073, 41),
+                          "login": (0x09C, 41), "password": (0x0C5, 41), "server": (0x0EE, 41),
+                          "dns1": (0x117, 16), "dns2": (0x127, 16)}
+                for k, v in item.get("set", {}).items():
+                    if k == "update_hour":
+                        b[0x137] = int(v)
+                    elif k in fields:
+                        off, n = fields[k]
+                        b[off:off + n] = cstr(str(v), n)
+                return out + self.say(0x0221, bytes(b[4:]), "dial-up %s" % item.get("set"))
+            if what == "isp":
+                # 0x0A01 (no answer): ISP login at +04, password at +68.
+                b = bytearray(0x100)
+                b[0x00:0x29] = cstr(item.get("login", ""), 41)
+                b[0x64:0x8D] = cstr(item.get("password", ""), 41)
+                out += self.say(0x0A01, bytes(b), "ISP login %r" % item.get("login"))
+                self.box_item = None
+                self.finish_item("sent")
+                continue
+            if what == "location_entry":
+                # 0x00D1: 154-byte records for location.dbf: u32 ID, NAME,
+                # CITY, STATE, COUNTRY.  The cabinet answers 0x00D2.
+                rec = (struct.pack("<I", int(item.get("id", 0))) + cstr(item.get("name", ""), 52) +
+                       cstr(item.get("city", ""), 31) + cstr(item.get("state", ""), 36) +
+                       cstr(item.get("country", ""), 31))
+                return out + self.say(0x00D1, rec, "location %s" % item.get("id"))
+            if what == "counters":
+                # 0x00C9: the event counters; the cabinet clears them once sent.
+                return out + self.say(0x00C9, what="event counters")
             self.box_item = None
             self.finish_item("unknown")
         return out + self.next_report()
+
+    def last_report(self, typ):
+        for r in reversed(STATE.get("reports", {}).get(self.serial, [])):
+            if r["type"] == typ:
+                return bytes.fromhex(r["raw"])
+        return None
 
     def finish_item(self, result):
         box = STATE["outbox"][self.serial]
@@ -541,9 +604,12 @@ class TournaMaxx:
     def outbox_answer(self, t, body):
         item = self.box_item
         what = item.get("do")
-        if what == "delete":
+        if what in ("delete", "settings", "dialup", "location_entry", "counters"):
+            # The answer is what the cabinet now holds: keep it.
+            STATE.setdefault("reports", {}).setdefault(self.serial, []).append(
+                {"type": "%04X" % t, "at": int(time.time()), "raw": body.hex()})
             self.box_item = None
-            self.finish_item("done")
+            self.finish_item("done, answered %04X" % t)
         elif what == "send_file":
             if t == 0x0114:
                 self.box_item = None

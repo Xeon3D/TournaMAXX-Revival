@@ -53,19 +53,19 @@ handler and answers with the next number up. The dispatcher (switch at
 | 0x0051 | 0x9db94 | 0x0052 | new players: empty = "next one?", with a body = "here is its permanent ID". *Verified.* |
 | 0x0067 | 0x9e98c | 0x0068 | score upload, one batch per request. *Verified.* |
 | 0x0073 | 0x9ea94 | 0x0074 (empty) | rankings. *Verified.* |
-| 0x0081 | 0x9e6bc | 0x0082 (empty) | players from elsewhere |
-| 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and dial-up options, into `C:\NTNVRAM.DAT` |
+| 0x0081 | 0x9e6bc | 0x0082 (empty) | players from other cabinets. *Verified.* |
+| 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and dial-up options, into `C:\NTNVRAM.DAT`. *Verified.* |
 | 0x00C1 | 0x9fab8 | 0x00C2, 0x00C3 | game statistics, two periods. *Verified.* |
-| 0x00C9 | 0xa0268 | | event counters (cleared once sent) |
-| 0x00D1 | 0xa2ccc | 0x00D2 (empty) | locations |
+| 0x00C9 | 0xa0268 | 0x00CA | event counters (cleared once sent). *Verified.* |
+| 0x00D1 | 0xa2ccc | 0x00D2 (empty) | locations. *Verified.* |
 | 0x00E1 | 0xa3034 | 0x00E2 | the last 14 calls. *Verified.* |
 | 0x0101, 0x0103 | 0x9f2c4, 0x9f460 | 0x0102 / 0x0104 | the server fetches a file |
 | 0x0111, 0x0112 | 0x9f59c, 0x9f6d0 | 0x0113 / 0x0114 | the server sends a file |
-| 0x0121 | 0x9f8a4 | 0x0122 | delete a file, and/or reboot after the call |
-| 0x0201 | 0xa07fc | 0x0202 | operator settings: read, or set then read. *Verified (read).* |
+| 0x0121 | 0x9f8a4 | 0x0122 | delete a file, and/or reboot after the call. *Verified.* |
+| 0x0201 | 0xa07fc | 0x0202 | operator settings: read, or set then read. *Verified.* |
 | 0x0211 | 0xa0d9c | 0x0212 | per-game settings: read, or set then read. *Verified (read).* |
-| 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read. *Verified (read).* |
-| 0x0A01 | 0xa2c20 | none | the ISP login and password |
+| 0x0221 | 0xa0ed8 | 0x0222 | dial-up settings: read, or set then read. *Verified.* |
+| 0x0A01 | 0xa2c20 | none | the ISP login and password. *Verified.* |
 | 0x0A11 | 0xa2c6c | none | the site's registration page, shown during Initial Connection. *Verified.* |
 | 0xFF01 | | 0xFF02 (empty) | status line; `COMPLETE.` ends the session. *Verified.* |
 | 0xFF11 | 0x9d2c8 | 0xFF02 | acknowledgment only |
@@ -199,8 +199,14 @@ An empty HANDLE or PIN deletes the player.
 
 ### 0x00D1 locations (server)
 
-Entries of 154 bytes, into `location.dbf` (ID, NAME, CITY, STATE, COUNTRY);
-the cabinet answers 0x00D2.
+Entries of 154 bytes, into `location.dbf`; the cabinet answers 0x00D2.
+*Verified.*
+
+    +00 u32   ID
+    +04 char  NAME[52]     (empty: the location is deleted)
+    +38 char  CITY[31]
+    +57 char  STATE[36]
+    +7B char  COUNTRY[31]
 
 ### 0x00B1 location and dial-up options (server, no answer)
 
@@ -259,7 +265,17 @@ An empty 0x0201 / 0x0211 / 0x0221 reads a block; with a body it is written
 first, then read back. *Reading verified.*
 
 - **0x0202** (285 bytes): operator settings: flags, volume, TournaMAXX
-  options, and the list of games switched on (84 game slots).
+  options, and the list of games switched on (84 game slots). Known:
+
+      +0A u8   volume, a mixer level 0–127 (values from 0x80 up are
+               ignored); the operator menu shows it as a percentage of 127,
+               rounded down (30 shows as 23). *Verified.*
+      +15      the game list, pairs (game, value) up to game 0x54; 0xFF here
+               in a 0x0201 leaves the games as they are (another value may
+               switch games on or off)
+
+  A 0x0201 carrying the first 0x11 bytes of a 0x0202 with a field changed,
+  and 0xFF at +15, changes just that field. *Verified.*
 - **0x0212** (172 bytes): a 4-bit setting for each of the 84 games.
 - **0x0222** (315 bytes): the Dial-Up Network screen. *Verified:*
 
@@ -273,6 +289,9 @@ first, then read back. *Reading verified.*
       +127 char  DNS 2 (text)         "12.127.17.71"
       +137 u8    UPDATE hour, 0–23    15
       +138 u8 ×3 (options)
+
+  A 0x0221 carrying a 0x0222 with a field changed writes it: the UPDATE hour
+  moved from 3 pm to 10 am. *Verified.*
 
 - **0x0A01** (no answer) sets the ISP login (+04) and password (+68), when the
   cabinet uses Merit's own ISP account.
@@ -306,6 +325,14 @@ Set the cabinet's modem line to "Dial out to a TCP/IP host", 127.0.0.1, port
   - `{"do": "send_file", "from": "local path", "to": "C:\\PATH"}`
   - `{"do": "fetch_file", "path": "C:\\PATH"}`: saved under `files\<serial>\`
   - `{"do": "delete", "path": "C:\\PATH", "reboot": false}`
+  - `{"do": "settings", "volume": 30}` (the percentage the operator menu
+    shows), or `{"do": "settings", "set": {"+0A": 38}}` (raw bytes of 0x0201)
+  - `{"do": "dialup", "set": {"update_hour": 10, "phone": "...", "login": "...",
+    "password": "...", "server": "...", "dns1": "...", "dns2": "..."}}`
+  - `{"do": "isp", "login": "...", "password": "..."}`
+  - `{"do": "location_entry", "id": 1, "name": "...", "city": "...",
+    "state": "...", "country": "..."}`
+  - `{"do": "counters"}`: read (and so clear) the event counters
 - `reports` → machine serial: the settings, statistics and call history
   each update call reads.
 
