@@ -34,6 +34,7 @@ import sys
 import os
 import threading
 import time
+import hashlib
 import json
 
 OUR_IP  = bytes([10, 0, 2, 2])
@@ -296,6 +297,7 @@ class TournaMaxx:
         # is rolled back by the cabinet (Emerald V8.04 restores its
         # databases), so everything in it has to go again next time.
         self.uncommitted = []
+        self.loc_queue = None
         self.protocol = None
         self.version = None
         self.updates_checked = False
@@ -537,10 +539,9 @@ class TournaMaxx:
                 # handles are what the rankings show), then the standings
                 # (each 0x0073 answered by an empty 0x0074).
                 self.reports = [r for r in REPORTS if self.knows(r[0])]
-                others = self.other_players()
-                out += others if others else self.send_rankings()
-            elif t == 0x0082:
-                out += self.send_rankings()
+                out += self.after_scores()
+            elif t in (0x0082, 0x00D2) and self.rank_msgs == 0 and self.box_item is None:
+                out += self.after_scores()
             elif t in (0x0074, 0x0072):
                 self.rank_msgs -= 1
                 if self.rank_msgs <= 0:
@@ -573,23 +574,69 @@ class TournaMaxx:
         ranks, self.rank_msgs = self.rankings()
         return ranks if ranks else self.after_rankings()
 
-    def other_players(self):
-        """0x0081: players registered at other cabinets that this one has not
-        been sent yet, so their handles, cities and states show in its
-        rankings.  Entries of 97 bytes (MEGACDLL 0x9e6bc): u32 ID, then the
-        player's record as their own cabinet sent it (from +4: u32, HANDLE,
-        PIN, CITY, STATE), u32 LOCATION.  The cabinet answers 0x0082."""
-        todo = [(pid, p) for pid, p in STATE["players"].items()
-                if p.get("cabinet") != self.serial and not self.delivered("players_sent", pid)]
+    def after_scores(self):
+        """Once the scores are in: the locations the players belong to (each
+        0x00D1 answered by 0x00D2), the players (0x0081, answered by 0x0082),
+        then the standings."""
+        if self.loc_queue is None:
+            self.loc_queue = self.locations_needed()
+        if self.loc_queue:
+            key, rec, what = self.loc_queue.pop(0)
+            self.mark("locations_sent", key)
+            return self.say(0x00D1, rec, what)
+        players = self.players_to_send()
+        return players if players else self.send_rankings()
+
+    @staticmethod
+    def location_id(serial):
+        """A cabinet's location number: its machine serial."""
+        return int(serial) if str(serial).isdigit() else 0
+
+    def location_record(self, serial):
+        """0x00D1, 154 bytes for Location.dbf: u32 ID, NAME[52], CITY[31],
+        STATE[36], COUNTRY[31], from the cabinet's "locations" entry (the
+        one its LOCATION INFO screen gets)."""
+        loc = STATE.get("locations", {}).get(serial, {})
+        city, _, state = loc.get("city_state", "").partition(",")
+        return (struct.pack("<I", self.location_id(serial)) + cstr(loc.get("name", ""), 52) +
+                cstr(city.strip(), 31) + cstr(state.strip(), 36) + cstr(loc.get("country", ""), 31))
+
+    def locations_needed(self):
+        """The locations of the players about to be sent, where this cabinet
+        does not have them as they are now.  Rankings show a player's
+        location name; Diamond V6.03 shows "Unknown" when it has none."""
+        todo = []
+        for cab in sorted({p.get("cabinet") for _, p in self.unsent_players()}):
+            if not self.location_id(cab):
+                continue
+            rec = self.location_record(cab)
+            key = "%s:%s" % (cab, hashlib.sha1(rec).hexdigest()[:12])
+            if not self.delivered("locations_sent", key):
+                todo.append((key, rec, "location %s, %r" % (cab, ctext(rec[4:56]))))
+        return todo
+
+    def unsent_players(self):
+        return [(pid, p) for pid, p in STATE["players"].items()
+                if not self.delivered("players_sent", pid)]
+
+    def players_to_send(self):
+        """0x0081: players this cabinet has not been sent yet, its own
+        included, so that every ranked player has a handle, city, state and
+        location there.  Entries of 97 bytes (MEGACDLL 0x9e6bc): u32 ID, then
+        the player's record as their cabinet sent it (from +4: u32, HANDLE,
+        PIN, CITY, STATE), u32 LOCATION (the home cabinet's location number,
+        see location_record).  At most 20 a message; the cabinet answers
+        0x0082 and gets the next batch."""
+        todo = self.unsent_players()[:20]     # 20 x 97 bytes fit a message
         if not todo:
             return b""
-        todo = todo[:20]                      # 20 × 97 bytes fit a message
         body = b""
         for pid, p in todo:
             raw = bytes.fromhex(p["raw"])
-            body += struct.pack("<I", int(pid)) + raw[4:0x5D] + struct.pack("<I", 0)
+            body += (struct.pack("<I", int(pid)) + raw[4:0x5D] +
+                     struct.pack("<I", self.location_id(p.get("cabinet", ""))))
             self.mark("players_sent", pid)
-        return self.say(0x0081, body, "%d players from other cabinets" % len(todo))
+        return self.say(0x0081, body, "%d players" % len(todo))
 
     def after_rankings(self):
         """The location, finals and removals (each 0x0021 answered by
