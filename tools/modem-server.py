@@ -394,7 +394,7 @@ class TournaMaxx:
                 out += self.next_tournament()
             elif t == 0x0022 and self.reports is not None:
                 out += self.run_outbox()         # the closing 0x0021s are done
-            elif self.box_item and (t in (0x0102, 0x0104, 0x0113, 0x0114, 0x0122, 0x0202,
+            elif self.box_item and (t in (0x0102, 0x0104, 0x0113, 0x0114, 0x0122, 0x0202, 0x0212,
                                           0x0222, 0x00D2, 0xFF02)
                                     or self.box_item.get("do") == "counters"):
                 out += self.outbox_answer(t, body)
@@ -540,6 +540,16 @@ class TournaMaxx:
                 b = bytearray(b"\0\0\0\0" + base[:0x11]) + b"\xff"
                 for k, v in item.get("set", {}).items():
                     b[int(k.lstrip("+"), 16)] = int(v) & 0xFF
+                for k, v in item.get("set16", {}).items():
+                    o = int(k.lstrip("+"), 16)
+                    b[o:o + 2] = struct.pack("<H", int(v))
+                if item.get("clear_scores"):
+                    # High-score clears from +15: (game, category) pairs,
+                    # category 0xFF for all; 0xFF ends the list.
+                    b = b[:0x15]
+                    for game, cat in item["clear_scores"]:
+                        b += bytes([int(game), int(cat) & 0xFF])
+                    b += b"\xff\xff"
                 if "volume" in item:
                     # +0A is a mixer level, 0-127; the operator menu shows it
                     # as a percentage of 127, rounded down.
@@ -579,6 +589,11 @@ class TournaMaxx:
                        cstr(item.get("city", ""), 31) + cstr(item.get("state", ""), 36) +
                        cstr(item.get("country", ""), 31))
                 return out + self.say(0x00D1, rec, "location %s" % item.get("id"))
+            if what == "prices":
+                # 0x0211 with a body: (game, credits) pairs; the cabinet
+                # answers 0x0212 with every game's price.
+                body = b"".join(bytes([int(g), int(c) & 0x0F]) for g, c in item.get("set", {}).items())
+                return out + self.say(0x0211, body, "prices %s" % item.get("set"))
             if what == "counters":
                 # 0x00C9: the event counters; the cabinet clears them once sent.
                 return out + self.say(0x00C9, what="event counters")
@@ -604,7 +619,7 @@ class TournaMaxx:
     def outbox_answer(self, t, body):
         item = self.box_item
         what = item.get("do")
-        if what in ("delete", "settings", "dialup", "location_entry", "counters"):
+        if what in ("delete", "settings", "dialup", "location_entry", "counters", "prices"):
             # The answer is what the cabinet now holds: keep it.
             STATE.setdefault("reports", {}).setdefault(self.serial, []).append(
                 {"type": "%04X" % t, "at": int(time.time()), "raw": body.hex()})

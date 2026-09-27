@@ -278,13 +278,22 @@ first, then read back. *Reading verified.*
       +09 u8   0x3e2   adult attract screens (0: the "mini" attract loop)
       +0A u8   —       volume, a mixer level 0–127; the operator menu
                        shows it as a percentage of 127, rounded down
-      +0B u8   0x3dc   security PIN on
-      +0C u8   0x3e9   HIGH SCORES reachable without the PIN
-      +0D u8   0x3ea   VIDEO BILLBOARD           "
-      +0E u8   0x3eb   VOLUME CONTROL            "
-      +0F u8   0x3f4   SCREEN CALIBRATION        "
-      +10 u8   0x401   UPDATE FROM SERVER        "
-      +11 u16  0x389   security PIN, 0–9999 (default 4123)
+      +0B u8   0x3dc   6 Star on (shows SET 6 STAR PIN)
+      +0C u8   0x3e9   6 Star opens HIGH SCORES
+      +0D u8   0x3ea   6 Star opens VIDEO BILLBOARD
+      +0E u8   0x3eb   6 Star opens VOLUME CONTROL
+      +0F u8   0x3f4   6 Star opens SCREEN CALIBRATION
+      +10 u8   0x401   6 Star opens UPDATE FROM SERVER
+      +11 u16  0x389   the 6 Star PIN: the order in which the six stars are
+                       touched, as a 4-digit number of star numbers 1–6
+                       (default 4123)
+
+  *6 Star* is the staff shortcut: from the info button of the main menu,
+  touching the six stars in the programmed order opens the screens switched
+  on above (the manuals' "DIP switch set to YES for each screen"). It is
+  not the Security PIN: that one (4–8 digits, a string at
+  `_NVRAMDATA`+0x116b, guarding the operator menus when bit 0x40 of
+  +0x1169 is set) is not carried by the protocol.
       +13 u8   0x3e6   adult content (lifts the high-score name filter,
                        BADNAME.DAT; gates the AC setting)
       +14 u8   0x1167  AC level 1–4 (bits 10–12)             ACUP/ACDN
@@ -299,10 +308,11 @@ first, then read back. *Reading verified.*
   0x54 — the category matters for the trivia games (3 and 33, seven
   categories each; 0xFF: all); a first byte from 0x54 up clears every
   game's high scores; 0xFF clears none. (MEGACDLL 0x1bda0: ten 19-byte
-  entries per game.) *Verified: the volume.*
+  entries per game.) *Verified: the volume, the adult-game mode and hours, high-score clears,
+  the 6 Star fields as stored.*
 
 - **0x0212** (172 bytes): the **price of each game**, 84 pairs (game number,
-  credits per play 0–15; 0: not offered). The low 4 bits of the game's
+  credits per play 0–15; 0: not offered). *Verified: Wild 8 set to 3CR.* The low 4 bits of the game's
   record (below); shown as "%dCR". While a tournament runs its CREDITS
   replace the game's price. A 0x0211 carries the same pairs.
 
