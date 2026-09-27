@@ -248,6 +248,24 @@ REPORTS = [
     (0x00E1, "report E1?"),
 ]
 
+# The commands each older client answers, by the protocol version in its
+# login (their dispatchers: Double Diamond V7.01 MEGACDLL 0x95bae, a table;
+# Diamond V6.03 0x9083f, a chain of compares).  Emerald V8.04 (7) and
+# Emerald 2 (9) answer everything sent here; so do versions not listed.
+KNOWS = {
+    6: {0x0011, 0x0021, 0x0041, 0x0051, 0x0067, 0x0071, 0x0073, 0x0081, 0x00B1,
+        0x00C1, 0x00C9, 0x00D1, 0x00E1, 0x0101, 0x0103, 0x0111, 0x0112, 0x0121,
+        0x0A01, 0x0A11, 0xFF01},
+    3: {0x0011, 0x0021, 0x0031, 0x0041, 0x0051, 0x0067, 0x0071, 0x0081, 0x00B1,
+        0x00C1, 0x00D1, 0x0101, 0x0103, 0x0111, 0x0112, 0x0121, 0x0A01, 0x0A11,
+        0xFF01, 0xFF11},
+}
+# The command an outbox item starts with.
+OUTBOX_COMMAND = {"message": 0x0A11, "delete": 0x0121, "send_file": 0x0111,
+                  "fetch_file": 0x0101, "settings": 0x0201, "prices": 0x0211,
+                  "dialup": 0x0221, "isp": 0x0A01, "location_entry": 0x00D1,
+                  "counters": 0x00C9}
+
 
 class TournaMaxx:
     """The TournaMAXX server end, as far as it is known (DOS MAXX, Emerald 2).
@@ -279,7 +297,13 @@ class TournaMaxx:
         # databases), so everything in it has to go again next time.
         self.uncommitted = []
         self.protocol = None
+        self.version = None
         self.updates_checked = False
+
+    def knows(self, t):
+        """Whether this cabinet's client answers command t."""
+        known = KNOWS.get(self.protocol)
+        return known is None or t in known
 
     @staticmethod
     def msg(t, body=b""):
@@ -412,11 +436,33 @@ class TournaMaxx:
                         continue
                     rank += 1
                     entries.append(struct.pack("<HIII5I", group, tid, pid, rank, *sc))
+        if not self.knows(0x0073):
+            return self.rankings_71(entries)
         out = b""
         for i in range(0, len(entries), 60):
             chunk = entries[i:i + 60]
             out += self.say(0x0073, b"".join(chunk), "rankings (%d entries)" % len(chunk))
         return out, (len(entries) + 59) // 60
+
+    def rankings_71(self, entries):
+        """The same standings as 0x0071, for clients without 0x0073 (Diamond
+        V6.03): one 92-byte entry per player and tournament (MEGACDLL V8.04
+        0x9c270), u32 tournament, u32 player, u32 total[3], u32 rank[3],
+        u32 score[3][5], by group; rank -1 where the player is not ranked.
+        At most 20 entries a message, each answered by an empty 0x0072."""
+        rows = {}
+        for e in entries:
+            group, tid, pid, rank = struct.unpack("<HIII", e[:14])
+            sc = struct.unpack("<5I", e[14:34])
+            r = rows.setdefault((tid, pid), ([0] * 3, [0xFFFFFFFF] * 3, [[0] * 5 for _ in range(3)]))
+            r[0][group], r[1][group], r[2][group] = sum(sc), rank, list(sc)
+        body = [struct.pack("<II3I3I15I", tid, pid, *tot, *rk, *(x for g in sc for x in g))
+                for (tid, pid), (tot, rk, sc) in sorted(rows.items())]
+        out = b""
+        for i in range(0, len(body), 20):
+            chunk = body[i:i + 20]
+            out += self.say(0x0071, b"".join(chunk), "rankings, old form (%d players)" % len(chunk))
+        return out, (len(body) + 19) // 20
 
     def received(self, data):
         self.buf += data
@@ -436,8 +482,13 @@ class TournaMaxx:
             if t == 0x0012:
                 self.serial = ctext(body[2:16])   # the machine serial
                 self.protocol = struct.unpack("<H", body[0:2])[0]
+                if self.protocol in (3, 6) and len(body) >= 0x3F:
+                    # The 81-byte login of Diamond and Double Diamond carries
+                    # the game's version, scanned from its version text
+                    # ("PG3002 V%d.%d "): major at +37, minor at +3B.
+                    self.version = "%d.%02d" % struct.unpack("<II", body[0x37:0x3F])
                 STATE.setdefault("logins", {})[self.serial] = {
-                    "protocol": self.protocol, "port": self.port,
+                    "protocol": self.protocol, "version": self.version, "port": self.port,
                     "at": int(time.time()), "raw": body.hex()}
                 save_state()
             if t == 0xFF02:
@@ -485,12 +536,12 @@ class TournaMaxx:
                 # Scores are in.  Players from other cabinets first (their
                 # handles are what the rankings show), then the standings
                 # (each 0x0073 answered by an empty 0x0074).
-                self.reports = list(REPORTS)
+                self.reports = [r for r in REPORTS if self.knows(r[0])]
                 others = self.other_players()
                 out += others if others else self.send_rankings()
             elif t == 0x0082:
                 out += self.send_rankings()
-            elif t == 0x0074:
+            elif t in (0x0074, 0x0072):
                 self.rank_msgs -= 1
                 if self.rank_msgs <= 0:
                     out += self.after_rankings()
@@ -564,6 +615,11 @@ class TournaMaxx:
     # Update packages, in the state file under "updates" -> name:
     #   {"protocol": 7, "send": [["local file", "C:\\PATH"], ...],
     #    "result": "C:\\RESULT.TXT"}
+    # or, for Diamond and Double Diamond (whose logins carry the version, and
+    # whose TEST.BAT runs only NetUpdt.exe, so there is no result file):
+    #   {"protocol": 6, "version": "7.01", "becomes": "7.20", "send": [...]}
+    # "version" limits it to cabinets logging in with that version; the
+    # update counts as installed when the cabinet logs in as "becomes".
     # go once to every cabinet whose login carries that protocol version:
     # the files, then a reboot.  A C:\NETUPDT.BAT among them is run by the
     # cabinet's TEST.BAT at boot, then deleted.  At the next call the result
@@ -581,6 +637,15 @@ class TournaMaxx:
             st = status.get(self.serial)
             if any(i.get("update") == name for i in box):
                 continue                              # still going out
+            if st == "queued" and u.get("becomes") and not u.get("result"):
+                if self.version == u["becomes"]:
+                    status[self.serial] = "installed: logs in as V%s" % self.version
+                else:
+                    status[self.serial] = "not installed: still logs in as V%s" % self.version
+                log(self.name, "  update %s: %s" % (name, status[self.serial]))
+                continue
+            if u.get("version") and self.version != u["version"]:
+                continue
             if st is None:
                 items = [{"do": "send_file", "from": src, "to": dst, "update": name}
                          for src, dst in u.get("send", [])]
@@ -616,6 +681,10 @@ class TournaMaxx:
         while box:
             item = box[0]
             what = item.get("do")
+            if not self.knows(OUTBOX_COMMAND.get(what, 0)):
+                self.finish_item("not for this cabinet (its client, protocol %s, has no %04X)"
+                                 % (self.protocol, OUTBOX_COMMAND.get(what, 0)))
+                continue
             if what == "message":
                 out += self.say(0x0A11, operator_page(item.get("text", "").split("\n")),
                                 "operator page")
