@@ -327,6 +327,20 @@ screen asks for it. LOGIN NAME and PIN# (slots 0, 1) are always asked, and
 0x00B1 does not reach them. The server sends each cabinet's `fields` from
 its `locations` entry (see [Running a server](#running-a-server-modem-serverpy)).
 
+Slot 30 (+0x14B) turns the form off: when it is not 0 the new-player screen
+(0xaf308, after the login name and PIN) skips the details form (0xb0d18)
+and registers the player with only a login name and PIN. Nothing but
+0x00B1 calls the option setter, so slot 30 changes only with the file
+itself (a new `NTNVRAM.DAT` has it 0).
+
+The rest of the file: +0x110 / +0x114 TournaMAXX games played, lifetime /
+this period; +0x118 / +0x11C their credits, likewise (each tournament game
+adds 1 and its price, 0x38134: the tournament's CREDITS, or the game's
+price when that is 0); +0x220 the month last counted (0–11) and +0x221
+u32[12] the tournament credits of each month, a month's entry zeroed when
+it comes round again (0x3f8d0). Clearing the books (0x43a80) zeroes the
+file but keeps the two lifetime counts.
+
 ### 0x0A11 registration page (server, no answer). *Verified.*
 
 The cabinet writes 1500 bytes of the body to `D:\Database\Operate.txt`.
@@ -472,9 +486,40 @@ first, then read back. *Reading verified.*
 ### Reports
 
 - **0x00C2 / 0x00C3**: game statistics, current period and lifetime
-  (0x9fab8): a 54-byte header (+04 u16 the number of games; totals, the
-  period's start year and month), then from +36 23 bytes for each game
-  offered whose lifetime credits (+03 of its record) are not 0:
+  (0x9fab8). A 54-byte header, each pair of counts from `_NVRAMDATA`
+  (current / lifetime) or `NTNVRAM.DAT` (period / lifetime):
+
+      +04 u16  the number of games below
+      +06 u32  total credits (_NVRAMDATA +0x27 / +0x2B)   the printer
+      +0A u32  free credits (+0x2F / +0x33)                audit's lines
+      +0E u32  credits played (+0x37 / +0x3B: each play adds its price)
+      +12 u16×6 meter pulses, per meter (floats at +0x355 / +0x36D;
+               their sum is the audit's TOT. MTR. PULSES)
+      +1E u32  TournaMAXX games played (NTNVRAM +0x114 / +0x110)
+      +22 u32  their credits (+0x11C / +0x118)
+      +26 …    0x00C2: zeros. 0x00C3: u16 year, u16 month (1–12), u32
+               this month's tournament credits; then at +2E the same for
+               the month before
+
+  *Verified: a header from a call* (5 total credits = meter pulses 2 + 3; 3
+  tournament games for 3 credits, all in September 2026). After the
+  header, from +36, 23 bytes for each game offered whose lifetime credits
+  (+03 of its record) are not 0, up to 84 (Diamond: from +18, up to 63).
+
+  Diamond V6.03's header is 24 bytes (0x930a4), with no TournaMAXX counts
+  and no total credits (its printer's TOTAL CREDITS, 0x143853, is not
+  sent):
+
+      +04 u16  the number of games below
+      +06 u16  the credits of the games below (the sum of their +05)
+      +08 u16  free credits (0x14385B / 0x14385F)
+      +0A u16  credits played (0x143863 / 0x143867)
+      +0C u16×6 meter pulses, per meter
+
+  Its per-game record is laid out as Emerald 2's. *Verified: an empty
+  report from a call (24 bytes).*
+
+  Each game's 23 bytes, in both:
 
       +00 u8   game number          +01 u8   price
       +02 u8   share of the plays, % (rounded)
@@ -484,6 +529,7 @@ first, then read back. *Reading verified.*
                lifetime count's low 16 bits
       +07 u16  shortest play, seconds   +09 u16  longest
       +0B u16  average                  +0D u16×5 linked, 1P, 2P, 3P, 4P
+
 - **0x00CA** (the answer to 0x00C9): 14-byte records, only those not zero:
 
       +0 u8   code          +1 u8 index

@@ -815,8 +815,15 @@ function cabReports(rep, protocol) {
       el("td", { class: "num" }, c.lifetime), el("td", { class: "num" }, c.since_report))),
     { empty: "Not read yet: queue “Read counters” under Actions." }));
   for (const [typ, label] of [["00C2", "Game statistics, current period"], ["00C3", "Game statistics, lifetime"]]) {
-    const g = rep[typ]?.decoded?.games || [];
+    const d = rep[typ]?.decoded;
+    const g = d?.games || [];
     parts.push(el("h3", {}, label, rep[typ] ? ` (read ${fmtTime(rep[typ].at)})` : ""),
+      d ? el("p", { class: "muted" },
+        d.total_credits != null ? `Total credits ${d.total_credits} · ` : `Credits of the games below ${d.games_credits} · `,
+        `free ${d.free_credits} · played ${d.credits_played} · meter pulses ${d.meter_pulses.join(" / ")}`,
+        d.tournament_plays != null ? ` · TournaMAXX games ${d.tournament_plays} (${d.tournament_credits} credits)` : "",
+        d.months?.length ? ` · tournament credits ${d.months.map((m) => `${m.year}-${String(m.month).padStart(2, "0")}: ${m.credits}`).join(", ")}` : "")
+        : null,
       table(["Game", { label: "Price", num: true }, { label: "Share %", num: true }, { label: "Plays", num: true },
         { label: "Credits", num: true }, { label: "Shortest", num: true }, { label: "Average", num: true },
         { label: "Longest", num: true }, { label: "Linked / 1P–4P", num: true }],

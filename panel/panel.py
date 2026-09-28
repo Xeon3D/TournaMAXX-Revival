@@ -461,17 +461,40 @@ def decode_00CA(b):
 
 def decode_stats(b):
     """0x00C2 / 0x00C3: the message's first 54 bytes are its header (here
-    without the 4 of the framing, like every report kept), then 23 bytes per
+    without the 4 of the framing, like every report kept): u16 games, u32
+    total, free and played credits, u16 x6 meter pulses, u32 TournaMAXX
+    games and credits, and (0x00C3) this and last month's tournament
+    credits with their year and month.  Diamond V6.03's header is 24 bytes
+    (MEGACDLL 0x930a4): u16 games, u16 the games' credits, u16 free credits,
+    u16 credits played, u16 x6 meter pulses.  Then 23 bytes per
     game played (MEGACDLL 0x9fab8): u8 game, u8 price, u8 share of plays %,
     u16 plays (every player of every game), u16 credits, u16 shortest,
     longest and average play in seconds, u16 x5 games: linked, 1-4 players."""
+    if len(b) % 23 == 20:  # Diamond V6.03
+        _, games_credits, free, played, *meters = struct.unpack("<4H6H", b[:20])
+        out = {"games_credits": games_credits, "free_credits": free, "credits_played": played,
+               "meter_pulses": meters}
+        start = 20
+    elif len(b) >= 50:
+        total, free, played = struct.unpack("<3I", b[2:14])
+        meters = list(struct.unpack("<6H", b[14:26]))
+        t_plays, t_credits = struct.unpack("<2I", b[26:34])
+        y1, m1, c1, y2, m2, c2 = struct.unpack("<HHIHHI", b[34:50])
+        out = {"total_credits": total, "free_credits": free, "credits_played": played,
+               "meter_pulses": meters, "tournament_plays": t_plays, "tournament_credits": t_credits,
+               "months": [{"year": y, "month": m, "credits": c}
+                          for y, m, c in ((y1, m1, c1), (y2, m2, c2)) if m]}
+        start = 50
+    else:
+        return None
     games = []
-    for i in range(50, len(b) - 22, 23):
+    for i in range(start, len(b) - 22, 23):
         g, price, share, plays, credits, short, long_, avg, *by = struct.unpack("<BBBHHHHH5H", b[i:i + 23])
         games.append({"game": g, "price": price, "share": share, "plays": plays, "credits": credits,
                       "shortest": short, "longest": long_, "average": avg,
                       "linked": by[0], "by_players": by[1:]})
-    return {"games": games}
+    out["games"] = games
+    return out
 
 
 DECODERS = {"0202": decode_0202, "0212": decode_0212, "0222": decode_0222, "00E2": decode_00E2,
