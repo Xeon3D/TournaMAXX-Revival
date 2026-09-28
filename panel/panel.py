@@ -460,13 +460,17 @@ def decode_00CA(b):
 
 
 def decode_stats(b):
-    """0x00C2 / 0x00C3: a 54-byte header, then 23 bytes per game offered.  The
-    per-game layout below (u8 game, u8 price, u8 share %, u32 plays) is read
-    from the description in the docs, not yet checked against a cabinet."""
+    """0x00C2 / 0x00C3: the message's first 54 bytes are its header (here
+    without the 4 of the framing, like every report kept), then 23 bytes per
+    game played (MEGACDLL 0x9fab8): u8 game, u8 price, u8 share of plays %,
+    u16 plays (every player of every game), u16 credits, u16 shortest,
+    longest and average play in seconds, u16 x5 games: linked, 1-4 players."""
     games = []
-    for i in range(54, len(b) - 22, 23):
-        g, price, share, plays = struct.unpack("<BBBI", b[i:i + 7])
-        games.append({"game": g, "price": price, "share": share, "plays": plays})
+    for i in range(50, len(b) - 22, 23):
+        g, price, share, plays, credits, short, long_, avg, *by = struct.unpack("<BBBHHHHH5H", b[i:i + 23])
+        games.append({"game": g, "price": price, "share": share, "plays": plays, "credits": credits,
+                      "shortest": short, "longest": long_, "average": avg,
+                      "linked": by[0], "by_players": by[1:]})
     return {"games": games}
 
 

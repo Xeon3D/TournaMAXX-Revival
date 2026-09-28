@@ -62,6 +62,9 @@ async function guard(fn, okMsg) {
 }
 
 const pad = (n) => String(n).padStart(2, "0");
+// Seconds as m:ss.
+const mss = (t) => (t == null ? "—" : `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`);
+
 function fmtTime(t) {
   if (!t) return "—";
   const d = new Date(t * 1000);
@@ -92,8 +95,32 @@ function bytes(n) {
 }
 
 // The game numbers the docs name; the rest show as numbers.
-const GAMES = { 48: "Wild 8", 13: "Zip 21", 15: "Quick Match" };
-const gameName = (g) => (GAMES[g] ? `${GAMES[g]} (#${g})` : `Game #${g}`);
+// The game numbers: the order of MERIT2\DATA\GAMEDATA.DAT (Emerald 2 V9.01),
+// and where the older releases have another game at a number, by protocol.
+const GAMES = ["SOLITAIRE", "RUN21", "ROYAL FLASH", "TRIVIA", "MATCH 'EM UP", "MEMOREE", "TRI-TOWERS",
+  "FOURPLAY", "CONQUEST", "STRIPCLUB", "ELEVEN UP", "MYST. PHRAZE", "HOOP JONES", "ZIP21", "CHECKERZ",
+  "QUIK MATCH", "PWR SOLITAIRE", "PIX MIX", "PHOTOHUNT", "QUIK CELL", "TAI-PLAY", "GOLF", "TENNIS",
+  "PUCK SHOT", "PILE ON", "TAKE 2", "DBL SOLITAIRE", "LINK TRIVIA", "MERRY MAIDENS", "ELEVEN BALL",
+  "CHUG21", "FUNKY MONKEY", "HOOTER", "POWER TRIVIA", "HEAD-TO-HEAD PHUNT", "TRIP-FLIP",
+  "HEAD-TO-HEAD TRIV", "3 BLIND MICE", "ROUTE 66", "SUPER RTE 66", "FAST LANE", "SNAPSHOT", "LOOK OUT",
+  "MONSTER MAD", "GOOOAL", "AIR SHOT", "PHARAOH'S NINE", "PILE HIGH", "WILD 8's", "QB ZONE",
+  "WILD APE's", "QUINTZEE", "JUMBLE CROSSWORD", "JUMBLE", "ASTRO JOE", "JUMBLE SAFARI", "OUTER SPADES",
+  "CRAZY HEARTS", "QUIZ SHOW", "BOXXI", "FOXY BOXXI", "MOONDROP", "EUCHRE NIGHTS", "BATTLE 31",
+  "BOX GLIDE", "BACK JAMMIN", "QUIK CHESS", "GENDER BENDER", "BOWLING", "QUIZ HOT TOPICS", "CHIPAWAY",
+  "SPEED DRAW", "FLASH 10", "EROTIC MATCH'EM UP", "EROTIC MEMOREE", "EROTIC MYST. PHRAZE",
+  "EROTIC PIX MIX", "EROTIC PHOTOHUNT", "EROTIC LOOK OUT", "EROTIC TRIVIA", "EROTIC POWER TRIVIA",
+  "SUPER SNUBBEL", "EROTIC H-H PHUNT", "MYST HOT TOPICS"];
+const GAMES_OLDER = {
+  7: { 52: "BASEBALL", 53: "DRIVE", 69: "SKAT", 81: "SNUBBEL", 83: "HEAD-HEAD SNAPSHOT" },
+  6: { 34: "HC ELEVEN UP", 36: "HC TRI-TOWERS", 52: "BASEBALL", 53: "DRIVE", 63: "THIRTY-ONE",
+    64: "GEM SWIPE", 66: "SPEED CHESS" },
+  3: { 34: "B-BRICKS", 36: "JOEPARDY", 52: "BASEBALL", 53: "DRIVE" },
+};
+// A game's name on a cabinet with that login protocol (none: Emerald 2's).
+const gameName = (g, protocol) => {
+  const n = GAMES_OLDER[protocol]?.[g] ?? GAMES[g];
+  return n ? `${n} (#${g})` : `Game #${g}`;
+};
 
 const STATUS = { 1: ["announced", "warn"], 2: ["running", "ok"], 4: ["final", "plain"], 5: ["removed", "plain"] };
 function tStatus(t) {
@@ -463,10 +490,10 @@ function cabinetDetail(st, serial) {
     Overview: () => cabOverview(st, serial, login, cab, box, done),
     Location: () => cabLocation(st, serial),
     "Operator settings": () => cabSettings(serial, rep["0202"], login),
-    Prices: () => cabPrices(serial, rep["0212"]),
+    Prices: () => cabPrices(serial, rep["0212"], login.protocol),
     "Dial-up": () => cabDialup(serial, rep["0222"]),
     Actions: () => cabActions(serial),
-    Reports: () => cabReports(rep),
+    Reports: () => cabReports(rep, login.protocol),
     Files: () => cabFiles(serial, cab.files),
   };
   let cur = sessionStorage.getItem("cabtab") || "Overview";
@@ -626,10 +653,10 @@ function cabSettings(serial, r, login) {
     await guard(() => queue(serial, item, "Settings"));
     route();
   };
-  return el("div", { class: "stack" }, f, clearScoresForm(serial));
+  return el("div", { class: "stack" }, f, clearScoresForm(serial, login.protocol));
 }
 
-function clearScoresForm(serial) {
+function clearScoresForm(serial, protocol) {
   const f = el("form", { class: "stack" },
     el("h3", {}, "Clear high scores"),
     el("div", { class: "form" },
@@ -641,18 +668,18 @@ function clearScoresForm(serial) {
     const v = formValues(f);
     const game = v.game === "" ? 0x54 : +v.game;
     const cat = v.cat === "" ? 255 : +v.cat;
-    if (!(await confirmBox("Clear high scores?", v.game === "" ? "Every game's high scores on this cabinet." : `${gameName(game)}'s high scores.`, "Queue clear"))) return;
+    if (!(await confirmBox("Clear high scores?", v.game === "" ? "Every game's high scores on this cabinet." : `${gameName(game, protocol)}'s high scores.`, "Queue clear"))) return;
     await guard(() => queue(serial, { do: "settings", clear_scores: [[game, cat]] }, "High-score clear"));
     route();
   };
   return f;
 }
 
-function cabPrices(serial, r) {
+function cabPrices(serial, r, protocol) {
   if (!r?.decoded) return needsReport(r, "prices");
   const prices = r.decoded.prices;
   const rows = Object.entries(prices).sort((a, b) => a[0] - b[0]).map(([g, c]) => el("tr", { hidden: !c },
-    el("td", {}, gameName(g)),
+    el("td", {}, gameName(g, protocol)),
     el("td", {}, el("input", { type: "number", min: 0, max: 15, value: c, "data-game": g, "data-orig": c }))));
   const t = table(["Game", "Credits per play (0: not offered)"], rows, { empty: "No games reported." });
   const all = el("input", { type: "checkbox" });
@@ -773,7 +800,7 @@ function sendFileDialog(serial) {
   }, "Upload and queue");
 }
 
-function cabReports(rep) {
+function cabReports(rep, protocol) {
   const parts = [];
   const hist = rep["00E2"]?.decoded?.calls || [];
   parts.push(el("h3", {}, "The cabinet's last calls", rep["00E2"] ? ` (read ${fmtTime(rep["00E2"].at)})` : ""),
@@ -790,11 +817,17 @@ function cabReports(rep) {
   for (const [typ, label] of [["00C2", "Game statistics, current period"], ["00C3", "Game statistics, lifetime"]]) {
     const g = rep[typ]?.decoded?.games || [];
     parts.push(el("h3", {}, label, rep[typ] ? ` (read ${fmtTime(rep[typ].at)})` : ""),
-      table(["Game", { label: "Price", num: true }, { label: "Share %", num: true }, { label: "Plays", num: true }],
-        g.map((x) => el("tr", {}, el("td", {}, gameName(x.game)), el("td", { class: "num" }, x.price),
-          el("td", { class: "num" }, x.share), el("td", { class: "num" }, x.plays))), { empty: "Not reported." }));
+      table(["Game", { label: "Price", num: true }, { label: "Share %", num: true }, { label: "Plays", num: true },
+        { label: "Credits", num: true }, { label: "Shortest", num: true }, { label: "Average", num: true },
+        { label: "Longest", num: true }, { label: "Linked / 1P–4P", num: true }],
+        g.map((x) => el("tr", {}, el("td", {}, gameName(x.game, protocol)), el("td", { class: "num" }, x.price),
+          el("td", { class: "num" }, x.share), el("td", { class: "num" }, x.plays),
+          el("td", { class: "num" }, x.credits ?? "—"), el("td", { class: "num" }, mss(x.shortest)),
+          el("td", { class: "num" }, mss(x.average)), el("td", { class: "num" }, mss(x.longest)),
+          el("td", { class: "num" }, x.by_players ? [x.linked, ...x.by_players].join(" / ") : "—"))),
+        { empty: "Not reported." }));
   }
-  parts.push(el("p", { class: "note" }, "The statistics' per-game layout is read from the protocol notes and not yet checked against a cabinet; the raw bytes are kept in the state file."));
+  parts.push(el("p", { class: "note" }, "The statistics' per-game layout is read from the cabinet's code and not yet checked against a report; the raw bytes are kept in the state file."));
   return el("div", {}, parts);
 }
 

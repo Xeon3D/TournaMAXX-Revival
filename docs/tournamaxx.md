@@ -142,7 +142,7 @@ also carry the game's version, scanned from its version text with
 Written into `D:\Database\tourney.dbf`.
 
     +004 u32  ID                  score file: D:\Database\SC<ID:06>.dbf
-    +008 u32  GAME                the launcher's game number (0x55dc0):
+    +008 u32  GAME                the game's number (see [Game numbers](#game-numbers)):
                                   48 Wild 8, 13 Zip 21, 15 Quick Match, …
     +00C u32  STATUS              1 announced, 2 running, 3 ended (the
                                   cabinet moves 1→2 at START and 2→3 at END,
@@ -426,13 +426,29 @@ first, then read back. *Reading verified.*
 - **The per-game record**, 36 bytes at `_NVRAMDATA`+0x42f + game × 0x24:
 
       +00 u8   flags (bits 0–6: offered / in a menu)
-      +01 u16  low 4 bits: price in credits; upper 12: the game's number
-      +03 u32  (set from the SQCL / DEFAULT / OVCL / CCCL screen)
-      +07 u32  current period: play times, packed (shortest / average /
-               longest, 10-bit fields)
-      +0B u16×5 current period: games by number of players
-      +15 u32  lifetime: play times, packed
-      +19 u16×5 lifetime: games by number of players
+      +01 u16  low 4 bits: price in credits; upper 12: credits played
+               this period (cleared with the books, 0x1dd64)
+      +03 u32  credits played, lifetime (never cleared)
+      +07 u8   the game's LoadSkips, from GAMEDATA.DAT (the launcher's
+               incremental-loader setting; default 20)
+      +08 u32  current period: play times in seconds, packed: bits 0–9
+               shortest, 10–19 average, 20–31 longest
+      +0C u16×5 current period: games by number of players; [0] linked
+               (Mega-Link) games, [1]–[4] games of 1–4 players
+      +16 u32  lifetime: play times, packed the same way
+      +1A u16×5 lifetime: games by number of players, likewise
+
+  Each play adds its price to both credit counts (0x54f78, which also takes
+  the credits off the meter). At the end of a game (0x44bbc) its length in
+  seconds, divided by the number of players (Head-to-Head Phunt and Trivia,
+  34 and 36, count as one), updates the shortest and longest times, and the
+  average becomes (average × plays + length) / (plays + players), where
+  plays counts every player of every game (0x4ccc0: the linked games plus
+  n × the games of n players). A linked game (the Mega-Link menu sets
+  0x184994, for a game whose GAMEDATA.DAT MaxPlayers is 0 and Linkable is
+  set) counts as one play of its whole length, in [0]. The printer shows the
+  times as ST / AT / LT (m:ss), the counts as 1P…4P and L. The printer audit ("CURRENT STATS" / "LIFE
+  STATS", 0x1e0c8) lists them per game, the lifetime list sorted by +03.
 
 - **0x0222** (315 bytes): the Dial-Up Network screen. *Verified:*
 
@@ -455,11 +471,19 @@ first, then read back. *Reading verified.*
 
 ### Reports
 
-- **0x00C2 / 0x00C3**: game statistics, current period and lifetime: a
-  54-byte header (totals, the period's start year and month), then for each
-  game offered 23 bytes: game number, price, share of play (%), total plays,
-  the game's number (upper 12 bits of the record), three 10-bit play times,
-  and the plays by number of players — from the per-game record above.
+- **0x00C2 / 0x00C3**: game statistics, current period and lifetime
+  (0x9fab8): a 54-byte header (+04 u16 the number of games; totals, the
+  period's start year and month), then from +36 23 bytes for each game
+  offered whose lifetime credits (+03 of its record) are not 0:
+
+      +00 u8   game number          +01 u8   price
+      +02 u8   share of the plays, % (rounded)
+      +03 u16  plays: every player of every game, the linked games once
+               (linked + 1P + 2 × 2P + 3 × 3P + 4 × 4P)
+      +05 u16  credits: 0x00C2 the period's (+01 >> 4), 0x00C3 the
+               lifetime count's low 16 bits
+      +07 u16  shortest play, seconds   +09 u16  longest
+      +0B u16  average                  +0D u16×5 linked, 1P, 2P, 3P, 4P
 - **0x00CA** (the answer to 0x00C9): 14-byte records, only those not zero:
 
       +0 u8   code          +1 u8 index
@@ -547,6 +571,56 @@ What the server keeps:
 - `update_status` → update → machine serial: queued, checking, or the outcome.
 - `had`, `final`, `removed`, `players_sent`, `locations_sent`: what each
   cabinet has been given, so that nothing is sent twice.
+
+## Game numbers
+
+A game's number (tournaments, prices, statistics, high-score clears,
+counters) is its place in `MERIT2\DATA\GAMEDATA.DAT`, a text file with a
+record per game (base file name, DLL, the name the menus show, graphics
+folder, players, link, ...), read into the launcher's table at 0x1822dc
+(0x76 bytes a game, the name at +0x28). Emerald 2 V9.01:
+
+| # | Game | # | Game | # | Game | # | Game |
+|---|---|---|---|---|---|---|---|
+| 0 | SOLITAIRE | 21 | GOLF | 42 | LOOK OUT | 63 | BATTLE 31 |
+| 1 | RUN21 | 22 | TENNIS | 43 | MONSTER MAD | 64 | BOX GLIDE |
+| 2 | ROYAL FLASH | 23 | PUCK SHOT | 44 | GOOOAL | 65 | BACK JAMMIN |
+| 3 | TRIVIA | 24 | PILE ON | 45 | AIR SHOT | 66 | QUIK CHESS |
+| 4 | MATCH 'EM UP | 25 | TAKE 2 | 46 | PHARAOH'S NINE | 67 | GENDER BENDER |
+| 5 | MEMOREE | 26 | DBL SOLITAIRE | 47 | PILE HIGH | 68 | BOWLING |
+| 6 | TRI-TOWERS | 27 | LINK TRIVIA | 48 | WILD 8's | 69 | QUIZ HOT TOPICS |
+| 7 | FOURPLAY | 28 | MERRY MAIDENS | 49 | QB ZONE | 70 | CHIPAWAY |
+| 8 | CONQUEST | 29 | ELEVEN BALL | 50 | WILD APE's | 71 | SPEED DRAW |
+| 9 | STRIPCLUB | 30 | CHUG21 | 51 | QUINTZEE | 72 | FLASH 10 |
+| 10 | ELEVEN UP | 31 | FUNKY MONKEY | 52 | JUMBLE CROSSWORD | 73 | EROTIC MATCH'EM UP |
+| 11 | MYST. PHRAZE | 32 | HOOTER | 53 | JUMBLE | 74 | EROTIC MEMOREE |
+| 12 | HOOP JONES | 33 | POWER TRIVIA | 54 | ASTRO JOE | 75 | EROTIC MYST. PHRAZE |
+| 13 | ZIP21 | 34 | HEAD-TO-HEAD PHUNT | 55 | JUMBLE SAFARI | 76 | EROTIC PIX MIX |
+| 14 | CHECKERZ | 35 | TRIP-FLIP | 56 | OUTER SPADES | 77 | EROTIC PHOTOHUNT |
+| 15 | QUIK MATCH | 36 | HEAD-TO-HEAD TRIV | 57 | CRAZY HEARTS | 78 | EROTIC LOOK OUT |
+| 16 | PWR SOLITAIRE | 37 | 3 BLIND MICE | 58 | QUIZ SHOW | 79 | EROTIC TRIVIA |
+| 17 | PIX MIX | 38 | ROUTE 66 | 59 | BOXXI | 80 | EROTIC POWER TRIVIA |
+| 18 | PHOTOHUNT | 39 | SUPER RTE 66 | 60 | FOXY BOXXI | 81 | SUPER SNUBBEL |
+| 19 | QUIK CELL | 40 | FAST LANE | 61 | MOONDROP | 82 | EROTIC H-H PHUNT |
+| 20 | TAI-PLAY | 41 | SNAPSHOT | 62 | EUCHRE NIGHTS | 83 | MYST HOT TOPICS |
+
+The older releases have fewer games, and a few numbers are other games:
+
+| # | Emerald V8.04 (84 games) | Double Diamond V7.01 (69) | Diamond V6.03 (63) |
+|---|---|---|---|
+| 34 | | HC ELEVEN UP | B-BRICKS |
+| 36 | | HC TRI-TOWERS | JOEPARDY |
+| 52, 53 | BASEBALL, DRIVE | BASEBALL, DRIVE | BASEBALL, DRIVE |
+| 63, 64 | | THIRTY-ONE, GEM SWIPE | |
+| 66 | | SPEED CHESS | |
+| 69 | SKAT | | |
+| 81 | SNUBBEL | | |
+| 83 | HEAD-HEAD SNAPSHOT | | |
+
+So a tournament's game can differ between cabinets of different releases.
+The licensed games whose plays 0x00CA counts (codes 11, 52, 53, 58, 69,
+83) are, on Emerald 2, Mystery Phraze, the two Jumbles, Quiz Show and the
+two Hot Topics.
 
 ## The cabinet's databases (`D:\Database\`)
 
@@ -645,5 +719,4 @@ no zip directory and extracts nothing.
 
 ## Still open
 
-- The per-game record's field at +03, and the names of games 11, 58, 69, 83.
 - The Linux MAXX releases (Ruby onward), which have their own client.
