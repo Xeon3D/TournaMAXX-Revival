@@ -63,7 +63,7 @@ each only what its protocol version has (see [Older releases](#older-releases)).
 | 0x0067 | 0x9e98c | 0x0068 | score upload, one batch per request. *Verified.* |
 | 0x0073 | 0x9ea94 | 0x0074 (empty) | rankings. *Verified.* |
 | 0x0081 | 0x9e6bc | 0x0082 (empty) | players (with their locations). *Verified.* |
-| 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and dial-up options, into `C:\NTNVRAM.DAT`. *Verified.* |
+| 0x00B1 | 0x9f9a8 | none | the cabinet's location (LOCATION INFO screen) and the fields its player registration asks for, into `C:\NTNVRAM.DAT`. *Verified.* |
 | 0x00C1 | 0x9fab8 | 0x00C2, 0x00C3 | game statistics, two periods. *Verified.* |
 | 0x00C9 | 0xa0268 | 0x00CA | event counters (cleared once sent). *Verified.* |
 | 0x00D1 | 0xa2ccc | 0x00D2 (empty) | locations. *Verified.* |
@@ -169,6 +169,22 @@ START and END are relative to the cabinet's own clock: it adds its time to
 them. How the cabinet then stores them is where Emerald V8.04 and older
 break (see [the date limit](#the-2002-date-limit)).
 
+### 0x0031 a tournament's group and prize (server, Diamond V6.03 only)
+
+The cabinet answers an empty 0x0032. Handler 0x92244 (Diamond V6.03, from
+its dispatcher's compare chain at 0x9083f); no later release has it.
+
+    +04 u32   tournament ID
+    +08 u32   n, 0–2 (not checked)
+    +0C char  GROUPn[51]
+    +3F char  PRIZEn[51]
+
+It looks the tournament up in `tourney.dbf` (0x8d268; not found: no
+answer), overwrites its GROUPn and PRIZEn with these, and saves the record:
+the same fields 0x0021 writes at +0C0 and +159, one pair at a time. The
+server has no use for it (a 0x0021 for a tournament the cabinet has
+already rewrites all of them) and does not send it.
+
 ### 0x0042 tournaments held (cabinet), 142 bytes. *Verified.*
 
     +04 u32   (session state)
@@ -271,17 +287,45 @@ the state file (`city_state` split at the comma).
     +57 char  STATE[36]
     +7B char  COUNTRY[31]
 
-### 0x00B1 location and dial-up options (server, no answer)
+### 0x00B1 location and registration fields (server, no answer)
 
 Written into `C:\NTNVRAM.DAT`, which SETUP.DLL's LOCATION INFO screen reads
 (an empty string shows as `? ? ? ? ?`):
 
-    +04 u8[13] options; only values below 3 are stored, so 0xFF leaves one
-               as it is
+    +04 u8[13] the registration fields, below
     +11 char   NAME[51]
     +44 char   CITY STATE[51]
     +77 char   COUNTRY[51]
     +AA char   TELEPHONE #[51]
+
+`NTNVRAM.DAT` is the object itself (0x255 bytes; Diamond V6.03's 0x215):
+the four strings at +0x10 (64 bytes each), then an option byte per slot at
++0x12D + slot (setter 0xa3f58, getter 0xb40f8). The thirteen bytes at +04
+are slots 2–14, and a value is only stored when below 3, so 0xFF leaves one
+as it is. The slots are the fields of the **new-player registration form**,
+named by the cabinet's own label table (0x1540c4; Diamond 0x123e30):
+
+| Slot | +04… | Field | | Slot | +04… | Field |
+|---|---|---|---|---|---|---|
+| 0 | — | LOGIN NAME | | 8 | +0A | REGION (PROVINCE) |
+| 1 | — | PIN# | | 9 | +0B | POSTAL CODE |
+| 2 | +04 | FIRST NAME | | 10 | +0C | COUNTRY |
+| 3 | +05 | LAST NAME | | 11 | +0D | TEL. # |
+| 4 | +06 | GENDER | | 12 | +0E | E-MAIL |
+| 5 | +07 | BIRTHDAY | | 13 | +0F | COMPANY NAME |
+| 6 | +08 | ADDRESS | | 14 | +10 | (no label) |
+| 7 | +09 | CITY | | | | |
+
+- **0**: required (the default: a new `NTNVRAM.DAT` is zeros). The entry
+  screen (0xb3668, through 0xadba8) does not accept `?` or nothing.
+- **1**: optional; left empty it is stored as `????` / blanks.
+- **2**: not asked; the registration screens (0xace60, 0xacff8, 0xaffa0,
+  0xb0d18) skip the field.
+
+The screens go through slots 2–12 only; COMPANY NAME has a label but no
+screen asks for it. LOGIN NAME and PIN# (slots 0, 1) are always asked, and
+0x00B1 does not reach them. The server sends each cabinet's `fields` from
+its `locations` entry (see [Running a server](#running-a-server-modem-serverpy)).
 
 ### 0x0A11 registration page (server, no answer). *Verified.*
 
@@ -458,6 +502,11 @@ What the operator sets:
   cabinet's LOCATION INFO screen (0x00B1), the registration page of Initial
   Connection, and the location other cabinets show for its players (0x00D1).
   A cabinet's entry is made with placeholder text at its first call.
+  `"fields": {"gender": 2, "e_mail": 1}` sets what its player registration
+  asks for (0 required, 1 optional, 2 not asked; a field left out stays as
+  the cabinet has it): `first_name`, `last_name`, `gender`, `birthday`,
+  `address`, `city`, `region`, `postal_code`, `country`, `telephone`,
+  `e_mail`, `company_name`, `slot_14` (see 0x00B1).
 - `outbox` → machine serial: done at that cabinet's next update call, then
   moved to `outbox_done` with the outcome. An item the cabinet's client has
   no command for is skipped as "not for this cabinet".
@@ -534,7 +583,7 @@ each only the commands its dispatcher has (`KNOWS` in `modem-server.py`):
 | 0x00C9 counters, 0x00E1 call history | yes | yes | yes | — |
 | 0x0201, 0x0211, 0x0221 settings | yes | yes | — | — |
 | 0xFF11 | yes | yes | — | yes |
-| 0x0031 (not known) | — | — | — | yes |
+| 0x0031 a tournament's group and prize | — | — | — | yes |
 
 - Emerald V8.04 and Double Diamond V7.01 dispatch through a table like
   Emerald 2's (V7.01 at 0x95bae); Diamond V6.03 through a chain of compares
@@ -596,7 +645,5 @@ no zip directory and extracts nothing.
 
 ## Still open
 
-- 0x00B1's thirteen option bytes.
-- Diamond V6.03's 0x0031.
 - The per-game record's field at +03, and the names of games 11, 58, 69, 83.
 - The Linux MAXX releases (Ruby onward), which have their own client.

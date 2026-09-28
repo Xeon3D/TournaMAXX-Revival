@@ -356,6 +356,14 @@ OUTBOX_COMMAND = {"message": 0x0A11, "delete": 0x0121, "send_file": 0x0111,
                   "fetch_file": 0x0101, "settings": 0x0201, "prices": 0x0211,
                   "dialup": 0x0221, "isp": 0x0A01, "location_entry": 0x00D1,
                   "counters": 0x00C9}
+# The player registration fields 0x00B1's option bytes set, in order: the
+# option slots 2-14 of C:\NTNVRAM.DAT (+0x12D + slot), named by the
+# cabinet's own labels (MEGACDLL, Emerald 2 0x1540c4; slots 0 and 1, LOGIN
+# NAME and PIN#, are always asked).  The registration screens go up to
+# e_mail; the last two have no screen that asks for them.
+REG_FIELDS = ("first_name", "last_name", "gender", "birthday", "address", "city",
+              "region", "postal_code", "country", "telephone", "e_mail",
+              "company_name", "slot_14")
 
 
 class TournaMaxx:
@@ -649,14 +657,18 @@ class TournaMaxx:
     def location(self):
         """0x00B1 (no answer): the cabinet's LOCATION INFO screen (NAME, CITY
         STATE, COUNTRY, TELEPHONE #), kept in C:\\NTNVRAM.DAT.  Four strings
-        of 51 at +11, +44, +77, +AA; the thirteen option bytes before them
-        are only stored when below 3, so 0xFF leaves them as they are.  The
-        text comes from the state file's "locations", by machine serial."""
+        of 51 at +11, +44, +77, +AA; before them, thirteen bytes that set how
+        the player registration form asks for each of REG_FIELDS: 0 required,
+        1 optional, 2 not asked (only values below 3 are stored, so 0xFF
+        leaves one as it is).  All from the state file's "locations", by
+        machine serial; "fields" names the registration fields to set."""
         loc = STATE.setdefault("locations", {}).setdefault(self.serial, {
             "name": "TOURNAMAXX CABINET", "city_state": "SET IN modem-server-state.json",
             "country": "", "telephone": ""})
         save_state()
-        body = b"\xff" * 13 + b"".join(
+        fields = loc.get("fields") or {}
+        opts = bytes(fields[k] if fields.get(k) in (0, 1, 2) else 0xFF for k in REG_FIELDS)
+        body = opts + b"".join(
             cstr(loc.get(k, ""), 51) for k in ("name", "city_state", "country", "telephone"))
         return self.say(0x00B1, body, "location %r" % loc.get("name"))
 

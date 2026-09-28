@@ -18,7 +18,7 @@ FROM python:3.13-slim
 LABEL org.opencontainers.image.title="TournaMAXX-Revival" \
       org.opencontainers.image.description="A TournaMAXX server for Merit Megatouch MAXX cabinets, with a web control panel" \
       org.opencontainers.image.source="https://github.com/Xeon3D/TournaMAXX-Revival" \
-      org.opencontainers.image.licenses="GPL-3.0-only"
+      org.opencontainers.image.licenses="GPL-2.0-only"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -540,6 +540,11 @@ async function queue(serials, item, what) {
   toast(`${what} queued for the next update call`);
 }
 
+// modem-server.py's REG_FIELDS, less the two no screen asks for.
+const REG_FIELDS = [["first_name", "First name"], ["last_name", "Last name"], ["gender", "Gender"],
+  ["birthday", "Birthday"], ["address", "Address"], ["city", "City"], ["region", "Region"],
+  ["postal_code", "Postal code"], ["country", "Country"], ["telephone", "Telephone"], ["e_mail", "E-mail"]];
+
 function cabLocation(st, serial) {
   const loc = st.locations?.[serial] || {};
   const f = el("form", { class: "stack" },
@@ -550,10 +555,22 @@ function cabLocation(st, serial) {
       field("City, state", input("city_state", loc.city_state, { maxlength: 50, placeholder: "Springfield, IL" })),
       field("Country", input("country", loc.country, { maxlength: 50 })),
       field("Telephone", input("telephone", loc.telephone, { maxlength: 50 }))),
+    el("h3", {}, "Player registration"),
+    el("p", { class: "muted" }, "What the cabinet's new-player form asks for, besides the login name and PIN."),
+    el("div", { class: "form" }, REG_FIELDS.map(([k, label]) => field(label,
+      el("select", { name: `field_${k}` }, [["", "leave as it is"], ["0", "required"], ["1", "optional"], ["2", "not asked"]]
+        .map(([v, l]) => el("option", { value: v, selected: String(loc.fields?.[k] ?? "") === v || null }, l)))))),
     el("div", { class: "row" }, el("button", { class: "primary", type: "submit" }, "Save location")));
   f.onsubmit = async (ev) => {
     ev.preventDefault();
-    await guard(() => op({ op: "put", path: ["locations", serial], value: { ...loc, ...formValues(f) } }), "Location saved");
+    const v = formValues(f);
+    const fields = { ...loc.fields };
+    for (const [k] of REG_FIELDS) {
+      if (v[`field_${k}`] !== "") fields[k] = +v[`field_${k}`];
+      else delete fields[k];
+      delete v[`field_${k}`];
+    }
+    await guard(() => op({ op: "put", path: ["locations", serial], value: { ...loc, ...v, fields } }), "Location saved");
     route();
   };
   return f;
