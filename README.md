@@ -34,10 +34,26 @@ It can be edited while the server runs; each call reads it again. The
 protocol, the state file and the outbox are described in
 [docs/tournamaxx.md](docs/tournamaxx.md).
 
-Two more options: `--tcp-ports 15000,17751` also takes TournaMAXX straight
+More options: `--tcp-ports 15000,17751` also takes TournaMAXX straight
 over TCP, for cabinets that reach the server on a real network (whose
-`us.accessmerit.com` points at it) instead of through a modem; and
-`--admin-port 2324` takes the control panel's requests on 127.0.0.1.
+`us.accessmerit.com` points at it) instead of through a modem;
+`--switch-port 8086` runs the Mega-Link switch (below); `--dns-port 53`
+answers cabinets on a network card that look up `us.accessmerit.com` (Jade 2
+and the other Linux releases on broadband: in MegaPPBox's SLiRP network, give
+the cabinet DNS 10.0.2.2); and `--admin-port 2324` takes the control panel's
+requests on 127.0.0.1.
+
+## Mega-Link over the internet
+
+MegaPPBox's **Remote Switch** network type sends a cabinet's Ethernet frames
+over UDP to a switch, so that cabinets in different places can play
+head-to-head and linked games. `megalink_switch.py` is that switch: the
+server runs it with `--switch-port 8086`, and the control panel's
+**Mega-Link** page sets its rooms (a name and a shared secret each), shows
+who is in them, and can switch on a public page, `/megalink`, that lists the
+public rooms, how full they are, and how to connect. Players need no port
+forwarding; the server needs UDP 8086 open. See
+[docs/tournamaxx.md](docs/tournamaxx.md#mega-link-over-the-internet).
 
 ## The control panel: `panel/`
 
@@ -52,25 +68,34 @@ and the calls take turns.
 
 To try it on your own machine (it runs the server itself):
 
-    python panel/panel.py --config panel.json --set-password admin
     python panel/panel.py --config panel.json
 
-then open http://127.0.0.1:8080/. The config (made on first run) sets the
-ports; see the top of `panel/panel.py`.
+then open http://127.0.0.1:8080/ and make the first user (a new panel asks
+for one during its first 15 minutes; `--set-password NAME` makes one from
+the command line instead). More users: **Settings > Users**. The config
+(made on first run) sets the ports; see the top of `panel/panel.py`.
 
 ## Docker
 
 The server and the panel in one image, for amd64 and arm64:
 
-    docker run -d --name tournamaxx --restart unless-stopped         -v tournamaxx:/data         -p 8080:8080 -p 2323:2323 -p 15000:15000 -p 17751:17751         -e TMX_ADMIN_PASSWORD=choose-one         xeon3d/tournamaxx-revival
+    docker run -d --name tournamaxx --restart unless-stopped \
+        -v tournamaxx:/data \
+        -p 8080:8080 -p 2323:2323 -p 15000:15000 -p 17751:17751 -p 8086:8086/udp \
+        xeon3d/tournamaxx-revival
 
-The panel is on port 8080 (user `admin`); it runs the server and starts it
-again if it stops. Without `TMX_ADMIN_PASSWORD` a password is made up and
-printed once in `docker logs tournamaxx`. Everything lives in the `/data`
-volume. On the first start `TMX_PORT` (default 2323) and `TMX_TCP_PORTS`
-(default `15000,17751`) set the ports; after that, change them in the panel
-and publish the same ports. Put the panel behind HTTPS before exposing it,
-and set `TMX_SECURE_COOKIES=true` when it is.
+The panel is on port 8080; it runs the server and starts it again if it
+stops. Open it within 15 minutes of the first start to make its first user
+(or set `TMX_ADMIN_PASSWORD`, and log in as `admin`). Everything lives in the
+`/data` volume. On the first start `TMX_PORT` (default 2323),
+`TMX_TCP_PORTS` (default `15000,17751`) and `TMX_SWITCH_PORT` (default 8086,
+UDP) set the ports; after that, change them in the panel and publish the
+same ports. Put the panel behind HTTPS before exposing it; behind a proxy
+that sends `X-Forwarded-Proto` its cookie is marked Secure by itself.
+
+On ZimaOS, or any Docker host behind Nginx Proxy Manager: see
+[docs/zimaos.md](docs/zimaos.md) and
+[deploy/docker-compose.yml](deploy/docker-compose.yml).
 
 To build it yourself: `docker build -t tournamaxx-revival .`
 
@@ -84,14 +109,14 @@ Each GitHub release publishes the image
 of this repository: the server and the panel as systemd services under
 their own user, nginx in front of the panel with a Let's Encrypt
 certificate, log rotation, and a sudo rule that lets the panel start and
-stop the server (and nothing else):
+stop the server (and nothing else); the Mega-Link switch runs on UDP 8086:
 
     sudo sh deploy/install.sh --domain us.accessmerit.com --email you@example.com
 
 It asks for the panel's admin password. Run it again to update; the data in
 `/var/lib/tournamaxx` stays. The machine needs TCP 80 and 443 (the panel),
-2323 (the emulators' modem calls) and, for direct connections, 15000 and
-17751.
+2323 (the emulators' modem calls), UDP 8086 (Mega-Link) and, for direct
+connections, 15000 and 17751.
 
 ## Update packages: `mkupdate.py`
 
@@ -123,13 +148,16 @@ No game files are included here: the fix is made from your own copy.
 | Path | What |
 |---|---|
 | `modem-server.py` | the server (Python 3, standard library only) |
+| `megalink_switch.py` | the Mega-Link switch for MegaPPBox's Remote Switch |
 | `panel/` | the web control panel (`panel.py` and its page) |
-| `deploy/` | `install.sh`, the systemd units, nginx and logrotate config |
+| `deploy/` | `install.sh`, the systemd units, nginx and logrotate config, `docker-compose.yml` |
 | `Dockerfile`, `docker/` | the Docker image and its entrypoint |
 | `mkupdate.py`, `mkupdate.spec` | the update-package maker and its PyInstaller spec |
 | `datefix/` | the tournament date fix: `tmfix.py` (needs `capstone`), its LE loader `lefile.py`, Emerald V8.04's installer `NETUPDT-V804.BAT` |
 | `tools/dbfcrypt.py` | reads the cabinet's encrypted `D:\Database\*.dbf` files |
-| `docs/tournamaxx.md` | the protocol, the state file, the older releases |
+| `tools/unpack_dstart.py` | unpacks a Linux release's game program (`/usr/local/bin/start`) |
+| `docs/tournamaxx.md` | the protocol, the state file, the older releases, Mega-Link |
+| `docs/zimaos.md` | running it on ZimaOS / Docker behind Nginx Proxy Manager |
 
 ## Licence
 

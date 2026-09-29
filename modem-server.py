@@ -217,6 +217,8 @@ def save_state():
 #   {"op": "append", "path": [...], "value": v}   append to a list (made if missing)
 #   {"op": "remove", "path": [...], "match": v}   remove the first element equal to v
 #   {"op": "replace", "value": {...}}             the whole state
+#   {"op": "switch"}                              the Mega-Link switch's rooms and
+#                                                 cabinets (null when it is off)
 # A path is keys and list indexes, e.g. ["outbox", "1234567"].  With the
 # server stopped, the panel applies the same function to the file itself.
 
@@ -271,6 +273,10 @@ def admin_client(sock):
     try:
         f = sock.makefile("rwb")
         req = json.loads(f.readline().decode("utf-8"))
+        if req.get("op") == "switch":            # its own lock; the state is not touched
+            f.write(json.dumps({"ok": True, "result": SWITCH.status() if SWITCH else None}).encode("utf-8") + b"\n")
+            f.flush()
+            return
         with LOCK:
             reload_state_if_changed()
             result = apply_admin(STATE, req)
@@ -1286,6 +1292,117 @@ def next_call_name():
         return "call %d" % CALLS
 
 
+SWITCH = None
+SLIRP_HOST = "10.0.2.2"      # where an emulator's SLiRP network reaches this machine
+
+
+# ------------------------------------------------------------ DNS
+#
+# Cabinets on a real network (a network card, not the modem) look up
+# us.accessmerit.com through their DNS server.  --dns-port answers them: the
+# names under DNS_NAMES get this server's address -- --dns-answer, or, left
+# out, 10.0.2.2 when the question comes from this machine (an emulator's
+# SLiRP passes its guest's DNS on from here; point the cabinet's DNS at
+# 10.0.2.2) and this machine's address as the asker reaches it otherwise.
+# Any other name is looked up here and answered as it resolves.
+
+# Merit's servers: TournaMAXX, and the web services Jade 2 and later call
+# after an update (Prize Zone, from config/APServers.ini, and Fantasy
+# Sports, both HTTP) -- kept here rather than let out to whoever holds
+# those names now.
+DNS_NAMES = ["accessmerit.com", "prizegames.com", "cdmsports.com"]
+
+
+def dns_name(q):
+    i, labels = 12, []
+    while i < len(q) and q[i]:
+        if q[i] & 0xC0 or i + 1 + q[i] > len(q):
+            return None, None, None
+        labels.append(q[i + 1:i + 1 + q[i]].decode("latin1"))
+        i += q[i] + 1
+    if i + 5 > len(q):
+        return None, None, None
+    qtype = struct.unpack("!H", q[i + 1:i + 3])[0]
+    return ".".join(labels).lower(), qtype, i + 5
+
+
+def dns_answer_ip(addr, fixed):
+    if fixed:
+        return fixed
+    if addr[0].startswith("127."):
+        return SLIRP_HOST
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(addr)
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return SLIRP_HOST
+
+
+def dns_reply(q, addr, fixed):
+    name, qtype, qend = dns_name(q)
+    if name is None:
+        return None, "?"
+    head = q[:2] + b"\x81\x80" + b"\0\x01"          # answer, recursion available
+    ours = any(name == n or name.endswith("." + n) for n in DNS_NAMES)
+    ips = []
+    if ours:
+        ips = [dns_answer_ip(addr, fixed)]
+    else:
+        try:
+            ips = sorted({ai[4][0] for ai in socket.getaddrinfo(name, None, socket.AF_INET)})
+        except (socket.gaierror, UnicodeError):
+            return q[:2] + b"\x81\x83" + b"\0\x01\0\0\0\0\0\0" + q[12:qend], "%s: no such name" % name
+    if qtype != 1:                                   # not A: no records, but the name exists
+        ips = []
+    ans = head + struct.pack("!HHH", len(ips), 0, 0) + q[12:qend]
+    for ip in ips:
+        ans += b"\xc0\x0c\0\x01\0\x01\0\0\0\x3c\0\x04" + socket.inet_aton(ip)
+    return ans, "%s -> %s%s" % (name, ", ".join(ips) or "(no A records)", " (ours)" if ours else "")
+
+
+def dns_server(port, fixed):
+    """Every interface if it can; else 127.0.0.1 only, which is enough for an
+    emulator's SLiRP (Windows often holds port 53 on its other adapters)."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        srv.bind(("0.0.0.0", port))
+        where = "every interface"
+    except OSError:
+        srv.bind(("127.0.0.1", port))
+        where = "127.0.0.1 only (the port is taken on the others): emulators' SLiRP, not the network"
+    log("dns", "answering DNS on UDP port %d, %s: %s -> %s" % (
+        port, where, ", ".join(DNS_NAMES), fixed or "this server (10.0.2.2 for SLiRP)"))
+
+    def one(q, addr):
+        try:
+            ans, what = dns_reply(q, addr, fixed)
+            if ans:
+                srv.sendto(ans, addr)
+            log("dns", "%s:%d asked for %s" % (addr[0], addr[1], what))
+        except Exception as e:
+            log("dns", "query from %s:%d failed: %s" % (addr[0], addr[1], e))
+
+    while True:
+        try:
+            q, addr = srv.recvfrom(1500)
+        except OSError:              # Windows: ICMP unreachable from an earlier reply
+            continue
+        if len(q) >= 12:
+            threading.Thread(target=one, args=(q, addr), daemon=True).start()
+
+
+def megalink_rooms():
+    """The Mega-Link switch's rooms: the state file's "megalink" -> "rooms",
+    each {"name", "secret", "max", "public", "description"}; a room with no
+    secret is for cabinets whose card has none."""
+    with LOCK:
+        reload_state_if_changed()
+        return json.loads(json.dumps(STATE.get("megalink", {}).get("rooms", [])))
+
+
 def listener(port, host="0.0.0.0"):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1311,6 +1428,15 @@ def main():
                          "ports, e.g. 15000,17751")
     ap.add_argument("--admin-port", type=int, default=0,
                     help="take the control panel's requests on 127.0.0.1 at this port")
+    ap.add_argument("--switch-port", type=int, default=0,
+                    help="run a Mega-Link switch for MegaPPBox's Remote Switch on this UDP port "
+                         "(8086 is the client's default); rooms from the state file")
+    ap.add_argument("--dns-port", type=int, default=0,
+                    help="answer DNS on this UDP port (53) for cabinets on a real network: "
+                         "us.accessmerit.com -> this server")
+    ap.add_argument("--dns-answer", default="",
+                    help="the address to answer with (default: 10.0.2.2 for an emulator's "
+                         "SLiRP, else this machine's address as the asker reaches it)")
     a = ap.parse_args()
     LOG = open(a.log, "a", encoding="utf-8")
     load_state(a.state)
@@ -1334,6 +1460,17 @@ def main():
         threading.Thread(target=accept_loop, daemon=True, args=(
             admin, lambda s, addr: threading.Thread(target=admin_client, args=(s,), daemon=True).start())).start()
         log("server", "control panel requests on 127.0.0.1:%d" % a.admin_port)
+    if a.dns_port:
+        def dns_run():
+            try:
+                dns_server(a.dns_port, a.dns_answer)
+            except OSError as e:
+                log("dns", "cannot answer DNS on UDP port %d: %s" % (a.dns_port, e))
+        threading.Thread(target=dns_run, daemon=True).start()
+    if a.switch_port:
+        global SWITCH
+        import megalink_switch
+        SWITCH = megalink_switch.Switch(a.switch_port, megalink_rooms, log).start()
     try:
         accept_loop(srv, modem_call)
     except KeyboardInterrupt:

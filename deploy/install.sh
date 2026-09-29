@@ -57,7 +57,7 @@ install -d -m 755 "$APP"
 
 say "code -> $APP"
 rm -rf "$APP/panel"
-cp "$SRC/modem-server.py" "$SRC/mkupdate.py" "$SRC/LICENSE" "$SRC/README.md" "$APP/"
+cp "$SRC/modem-server.py" "$SRC/megalink_switch.py" "$SRC/mkupdate.py" "$SRC/LICENSE" "$SRC/README.md" "$APP/"
 cp -r "$SRC/panel" "$SRC/docs" "$SRC/deploy" "$APP/"
 find "$APP" -name __pycache__ -prune -exec rm -rf {} +
 rm -f "$APP/panel/panel.json"
@@ -75,7 +75,7 @@ if [ ! -f "$DATA/panel.json" ]; then
  "server_script": "$APP/modem-server.py",
  "mkupdate_script": "$APP/mkupdate.py",
  "service": {"mode": "systemd", "unit": "tournamaxx"},
- "server": {"port": 2323, "tcp_ports": [15000, 17751], "admin_port": 2324},
+ "server": {"port": 2323, "tcp_ports": [15000, 17751], "admin_port": 2324, "switch_port": 8086},
  "secure_cookies": $SECURE,
  "users": {}
 }
@@ -84,7 +84,7 @@ EOF
     chmod 600 "$DATA/panel.json"
 fi
 if [ ! -f "$DATA/server.env" ]; then
-    echo "TMX_ARGS=--port 2323 --tcp-ports 15000,17751 --admin-port 2324" > "$DATA/server.env"
+    echo "TMX_ARGS=--port 2323 --tcp-ports 15000,17751 --admin-port 2324 --switch-port 8086" > "$DATA/server.env"
     chown tournamaxx:tournamaxx "$DATA/server.env"
 fi
 
@@ -133,13 +133,14 @@ fi
 say "firewall"
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     for p in 80 443 2323 15000 17751; do ufw allow "$p/tcp" >/dev/null; done
-    echo "ufw: opened 80, 443, 2323, 15000, 17751"
+    ufw allow 8086/udp >/dev/null
+    echo "ufw: opened TCP 80, 443, 2323, 15000, 17751 and UDP 8086"
 else
-    echo "no active ufw: make sure TCP 80, 443, 2323, 15000 and 17751 reach this machine"
+    echo "no active ufw: make sure TCP 80, 443, 2323, 15000, 17751 and UDP 8086 reach this machine"
 fi
 
 say "done"
 echo "server: $(systemctl is-active tournamaxx), panel: $(systemctl is-active tournamaxx-panel)"
 PROTO=https; [ "$TLS" = 1 ] || PROTO=http
 echo "Control panel: $PROTO://$DOMAIN/  (user admin)"
-echo "Emulators dial $DOMAIN, port 2323."
+echo "Emulators dial $DOMAIN, port 2323; Mega-Link: Remote Switch $DOMAIN:8086."

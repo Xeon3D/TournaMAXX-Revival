@@ -3,10 +3,14 @@
 panel's config into /data from the environment, and its admin password;
 then run the panel, which runs the server.
 
-    TMX_ADMIN_PASSWORD   the panel's admin password (first start only; without
-                         it one is made up and printed in the container's log)
+    TMX_ADMIN_PASSWORD   the first user's password (first start only; without
+                         it the panel asks for the first user when it is
+                         opened, within 15 minutes of starting)
+    TMX_ADMIN_USER       that user's name (default "admin")
     TMX_PORT             the modem-call port (default 2323)
     TMX_TCP_PORTS        direct TournaMAXX ports (default "15000,17751"; "" for none)
+    TMX_SWITCH_PORT      the Mega-Link switch's UDP port (default 8086; 0 for none;
+                         also set in a config made before the switch existed)
     TMX_SECURE_COOKIES   "true" when the panel is behind HTTPS
 
 The ports are only read on the first start; later they are changed in the
@@ -14,7 +18,6 @@ panel (Settings), which keeps them in /data/panel.json.
 """
 import json
 import os
-import secrets
 import subprocess
 import sys
 
@@ -39,16 +42,16 @@ def main():
         os.chmod(CONFIG, 0o600)
         print("made %s" % CONFIG, flush=True)
     with open(CONFIG, encoding="utf-8") as f:
-        users = json.load(f).get("users")
-    if not users:
-        pw = os.environ.get("TMX_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
-        subprocess.run([sys.executable, PANEL, "--config", CONFIG, "--set-password", "admin"],
-                       env=dict(os.environ, TMX_PASSWORD=pw), check=True)
-        if not os.environ.get("TMX_ADMIN_PASSWORD"):
-            print("=" * 60)
-            print("The control panel's login: admin / %s" % pw)
-            print("(change it in the panel, under Settings)")
-            print("=" * 60, flush=True)
+        cfg = json.load(f)
+    if "switch_port" not in cfg.setdefault("server", {}):
+        cfg["server"]["switch_port"] = int(os.environ.get("TMX_SWITCH_PORT", "8086") or 0)
+        with open(CONFIG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=1)
+    users = cfg.get("users")
+    if not users and os.environ.get("TMX_ADMIN_PASSWORD"):
+        subprocess.run([sys.executable, PANEL, "--config", CONFIG, "--set-password",
+                        os.environ.get("TMX_ADMIN_USER", "admin")],
+                       env=dict(os.environ, TMX_PASSWORD=os.environ["TMX_ADMIN_PASSWORD"]), check=True)
     os.execv(sys.executable, [sys.executable, PANEL, "--config", CONFIG])
 
 

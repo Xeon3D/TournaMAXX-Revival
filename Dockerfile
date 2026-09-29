@@ -2,10 +2,11 @@
 # TournaMAXX-Revival: the server and its web control panel in one image.
 #
 #   docker run -d --name tournamaxx -v tournamaxx:/data \
-#       -p 8080:8080 -p 2323:2323 -p 15000:15000 -p 17751:17751 \
-#       -e TMX_ADMIN_PASSWORD=... xeon3d/tournamaxx-revival
+#       -p 8080:8080 -p 2323:2323 -p 15000:15000 -p 17751:17751 -p 8086:8086/udp \
+#       xeon3d/tournamaxx-revival
 #
 # The panel (http://host:8080/) runs the server and restarts it if it stops.
+# Opened the first time, it asks for its first user (or set TMX_ADMIN_PASSWORD).
 # Everything the server keeps (state, log, fetched files, packages, backups)
 # and the panel's config live in /data.  Put the panel behind HTTPS
 # (TMX_SECURE_COOKIES=true) before exposing it to the internet.
@@ -25,7 +26,7 @@ ENV PYTHONUNBUFFERED=1 \
     TMX_DATA=/data
 
 # Read-only code, whatever the permissions of the checkout it is built from.
-COPY --chmod=u=rwX,go=rX modem-server.py mkupdate.py LICENSE README.md /app/
+COPY --chmod=u=rwX,go=rX modem-server.py megalink_switch.py mkupdate.py LICENSE README.md /app/
 COPY --chmod=u=rwX,go=rX panel/ /app/panel/
 COPY --chmod=u=rwX,go=rX docs/ /app/docs/
 COPY --chmod=u=rwX,go=rX docker/entrypoint.py /app/docker/entrypoint.py
@@ -36,9 +37,10 @@ USER 1000:1000
 WORKDIR /data
 VOLUME /data
 
-# 8080 the control panel; 2323 the emulators' modem calls; 15000 and 17751
-# TournaMAXX straight over TCP.
-EXPOSE 8080 2323 15000 17751
+# 8080 the control panel (and the public Mega-Link page, /megalink); 2323 the
+# emulators' modem calls; 15000 and 17751 TournaMAXX straight over TCP;
+# 8086/udp the Mega-Link switch.
+EXPOSE 8080 2323 15000 17751 8086/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD ["python3", "-c", "import urllib.request as u, urllib.error as e\ntry: u.urlopen('http://127.0.0.1:8080/api/session', timeout=4)\nexcept e.HTTPError as x: raise SystemExit(x.code != 401)"]

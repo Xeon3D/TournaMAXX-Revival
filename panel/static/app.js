@@ -197,12 +197,36 @@ let ME = null;
 let STATE = null;
 let timer = null;
 
-function showLogin() {
+async function showLogin() {
   ME = null;
   $("#app").hidden = true;
   $("#login").hidden = false;
   clearInterval(timer);
+  // A fresh install: make the first user instead.
+  const st = await fetch("/api/setup").then((r) => r.json()).catch(() => ({}));
+  $("#login-form").hidden = !!st.needed;
+  $("#setup-form").hidden = !st.needed;
+  if (st.needed && !st.open) {
+    $("#setup-note").textContent = `First-run setup is closed: it stays open ${st.minutes} minutes after the panel starts. ` +
+      "Restart the panel (or its container) and make the first user then.";
+    $("#setup-form").querySelector("button").disabled = true;
+  }
 }
+
+$("#setup-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const v = formValues(ev.target);
+  $("#setup-error").textContent = "";
+  if (v.password !== v.again) return ($("#setup-error").textContent = "The two passwords differ.");
+  try {
+    const r = await api("/api/setup", { body: { user: v.user, password: v.password } });
+    ME = r.user;
+    ev.target.reset();
+    start();
+  } catch (e) {
+    $("#setup-error").textContent = e.message;
+  }
+});
 
 $("#login-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -1003,7 +1027,10 @@ PAGES.settings = async (main) => {
     el("div", { class: "form" },
       field("Modem calls (what emulators dial)", input("port", s.server.port, { type: "number", min: 1, max: 65535 })),
       field("Direct TournaMAXX ports (blank: off)", input("tcp_ports", (s.server.tcp_ports || []).join(", "), { placeholder: "15000, 17751" })),
-      field("Admin port (127.0.0.1 only)", input("admin_port", s.server.admin_port, { type: "number", min: 1, max: 65535 }))),
+      field("Admin port (127.0.0.1 only)", input("admin_port", s.server.admin_port, { type: "number", min: 1, max: 65535 })),
+      field("Mega-Link switch, UDP (blank or 0: off)", input("switch_port", s.server.switch_port || "", { type: "number", min: 0, max: 65535, placeholder: "8086" })),
+      field("DNS for cabinets on a network, UDP (blank or 0: off)", input("dns_port", s.server.dns_port || "", { type: "number", min: 0, max: 65535, placeholder: "53" })),
+      field("DNS answer for us.accessmerit.com (blank: automatic)", input("dns_answer", s.server.dns_answer || "", { placeholder: "10.0.2.2 for SLiRP" }))),
     el("p", { class: "muted" }, "Direct ports take TournaMAXX straight over TCP, for cabinets that reach this host on a real network ",
       "(its DNS name is us.accessmerit.com) instead of dialing the modem port. The firewall must let these ports in."),
     el("div", { class: "row" }, el("button", { class: "primary", type: "submit" }, "Save and restart the server")));
@@ -1011,7 +1038,7 @@ PAGES.settings = async (main) => {
     ev.preventDefault();
     const v = formValues(srv);
     const tcp = v.tcp_ports.split(/[\s,]+/).filter(Boolean).map(Number);
-    const r = await guard(() => api("/api/settings", { body: { server: { port: +v.port, tcp_ports: tcp, admin_port: +v.admin_port }, restart: true } }));
+    const r = await guard(() => api("/api/settings", { body: { server: { port: +v.port, tcp_ports: tcp, admin_port: +v.admin_port, switch_port: +v.switch_port || 0, dns_port: +v.dns_port || 0, dns_answer: v.dns_answer.trim() }, restart: true } }));
     toast(r.restarted ? "Saved; the server restarted" : "Saved; it applies when the server starts");
     refreshPill();
   };
@@ -1066,8 +1093,124 @@ PAGES.settings = async (main) => {
       }, "Open editor")),
     el("p", { class: "muted" }, "The server's whole state file, as docs/tournamaxx.md describes it. Cabinet-reported raw bytes are included."));
 
-  fill(main, header("Settings", `Data in ${s.data_dir} · users: ${s.users.join(", ")}`),
-    el("div", { class: "grid cols-2" }, srv, pw), bk, raw);
+  fill(main, header("Settings", `Data in ${s.data_dir}`),
+    el("div", { class: "grid cols-2" }, srv, pw), await usersCard(), bk, raw);
+};
+
+// Everyone here can do everything: users are only separate logins.
+async function usersCard() {
+  const { users } = await api("/api/users");
+  const card = el("div", { class: "card stack" });
+  const redraw = async () => card.replaceWith(await usersCard());
+  const add = el("form", { class: "form" },
+    field("New user", input("user", "", { required: true, pattern: "[A-Za-z0-9_.\\-]{1,32}", autocomplete: "off" })),
+    field("Password (10+ characters)", input("password", "", { type: "password", minlength: 10, required: true, autocomplete: "new-password" })),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Add user")));
+  add.onsubmit = async (ev) => {
+    ev.preventDefault();
+    await guard(() => api("/api/users/add", { body: formValues(add) }), "User added");
+    redraw();
+  };
+  const rows = users.map((u) => el("tr", {},
+    el("td", {}, u.name, u.you ? el("small", { class: "muted" }, " (you)") : null),
+    el("td", {}, u.you ? el("small", { class: "muted" }, "change yours under Your password") : el("div", { class: "row" },
+      el("button", {
+        class: "small", onclick: async () => {
+          const r = await dialog(`New password for ${u.name}`, (b) => {
+            const i = input("password", "", { type: "password", minlength: 10, required: true, autocomplete: "new-password" });
+            b.append(field("Password (10+ characters)", i), el("p", { class: "muted" }, "They are logged out everywhere."));
+            return () => api("/api/users/password", { body: { user: u.name, password: i.value } });
+          }, "Set password");
+          if (r) { toast("Password set"); redraw(); }
+        },
+      }, "Set password"),
+      el("button", {
+        class: "small danger", onclick: async () => {
+          if (!(await confirmBox(`Delete ${u.name}?`, "They can no longer log in, and are logged out now.", "Delete"))) return;
+          await guard(() => api("/api/users/delete", { body: { user: u.name } }), "User deleted");
+          redraw();
+        },
+      }, "Delete")))));
+  card.append(el("h2", {}, "Users"),
+    el("p", { class: "muted" }, "Each user has the same access; they are separate logins."),
+    table(["User", ""], rows), add);
+  return card;
+}
+
+// ------------------------------------------------------------------ Mega-Link
+
+PAGES.megalink = async (main) => {
+  const r = await api("/api/megalink");
+  const cfg = r.config || {};
+  const live = Object.fromEntries((r.status?.rooms || []).map((x) => [x.name, x]));
+  const rooms = (cfg.rooms || []).map((x) => ({ ...x }));
+
+  const state = r.switch_port
+    ? (r.status ? pill(`Switch on UDP ${r.switch_port}`, "ok") : pill(r.running ? "Switch not answering" : "Server stopped", "bad"))
+    : pill("Switch off: set its port under Settings", "bad");
+
+  // The rooms: each a secret; cabinets with the same one are on one Ethernet segment.
+  const body = el("tbody");
+  const draw = () => fill(body, rooms.map((x, i) => {
+    const l = live[x.name];
+    const cabs = l?.cabinets || [];
+    return [el("tr", {},
+      el("td", {}, el("input", { value: x.name || "", oninput: (e) => (x.name = e.target.value), placeholder: "Main" })),
+      el("td", {}, el("input", { value: x.secret || "", oninput: (e) => (x.secret = e.target.value), placeholder: "(none: the open room)" })),
+      el("td", {}, el("input", { type: "number", min: 2, max: 16, value: x.max || 8, oninput: (e) => (x.max = +e.target.value), class: "narrow" })),
+      el("td", {}, el("input", { type: "checkbox", checked: !!x.public, onchange: (e) => (x.public = e.target.checked) })),
+      el("td", {}, el("input", { value: x.description || "", oninput: (e) => (x.description = e.target.value) })),
+      el("td", { class: "num" }, l ? `${cabs.length} / ${l.max}` : "—"),
+      el("td", {}, el("button", { class: "small danger", type: "button", onclick: () => { rooms.splice(i, 1); draw(); } }, "Remove"))),
+    cabs.length ? el("tr", {}, el("td", { colspan: 7 },
+      l.ip_conflicts.length ? el("p", { class: "error" }, `Two cabinets use ${l.ip_conflicts.join(", ")}: give each its own Ethernet IP address.`) : null,
+      table(["Cabinet", "IP", "MAC", { label: "In room", num: true }, { label: "Frames in / out", num: true }],
+        cabs.map((c) => el("tr", {}, el("td", {}, el("code", {}, c.address)), el("td", {}, c.ips.join(", ") || "—"),
+          el("td", {}, el("code", {}, c.macs.join(", ") || "—")), el("td", { class: "num" }, ago(c.since)),
+          el("td", { class: "num" }, `${c.frames_in} / ${c.frames_out}`)))))) : null];
+  }));
+  draw();
+  const save = async () => {
+    const names = rooms.map((x) => x.name.trim());
+    if (names.some((n) => !n)) return toast("Every room needs a name.", true);
+    if (new Set(names).size !== names.length) return toast("Two rooms have the same name.", true);
+    if (new Set(rooms.map((x) => x.secret || "")).size !== rooms.length) return toast("Two rooms have the same secret.", true);
+    await guard(() => op({ op: "put", path: ["megalink", "rooms"], value: rooms.map((x) => ({ ...x, name: x.name.trim() })) }), "Rooms saved");
+    route();
+  };
+  const roomsCard = el("div", { class: "card stack" },
+    el("div", { class: "row spread" }, el("h2", {}, "Rooms"), state),
+    el("p", { class: "muted" }, "Each room is one Mega-Link network. A cabinet joins by its card's secret (MegaPPBox: Network, ",
+      "Remote Switch, this host and port, and the room's secret); with no secret it joins the open room, if there is one. ",
+      "Public rooms, with their secret, are listed on the public page."),
+    el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Name", "Secret", "Cabinets", "Public", "Description", "Now", ""].map((h) => el("th", {}, h)))),
+      body)),
+    el("div", { class: "row" },
+      el("button", { type: "button", onclick: () => { rooms.push({ name: "", secret: "", max: 8, public: true }); draw(); } }, "Add room"),
+      el("button", { class: "primary", type: "button", onclick: save }, "Save rooms")));
+
+  const pub = el("form", { class: "card stack" },
+    el("h2", {}, "Public page"),
+    el("p", { class: "muted" }, "A page anyone can open, without logging in, at ",
+      el("a", { href: "/megalink", target: "_blank" }, "/megalink"), ": the public rooms, how full they are, and how to connect. ",
+      "It shows no addresses."),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "public_page", checked: !!cfg.public_page }), "Show the public page"),
+    el("div", { class: "form" },
+      field("Host players connect to (blank: this page's)", input("host", cfg.host, { placeholder: "megalink.example.com" }), "wide"),
+      field("Text at the top", el("textarea", { name: "intro", rows: 3 }, cfg.intro || ""), "wide")),
+    el("div", { class: "row" }, el("button", { class: "primary", type: "submit" }, "Save")));
+  pub.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formValues(pub);
+    for (const k of ["public_page", "host", "intro"])
+      await guard(() => op({ op: "put", path: ["megalink", k], value: k === "public_page" ? v[k] : v[k].trim() }));
+    toast("Saved");
+    route();
+  };
+
+  fill(main, header("Mega-Link", "Linked play between emulated cabinets over the internet, through this server's switch.",
+    el("button", { onclick: () => route() }, "Refresh")), roomsCard, pub);
 };
 
 // ------------------------------------------------------------------ boot

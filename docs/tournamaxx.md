@@ -558,7 +558,14 @@ takes TournaMAXX straight over TCP on those ports (no modem, no PPP), and
 with `--admin-port N` it takes requests from the control panel
 (`panel/panel.py`) on 127.0.0.1: one JSON object per connection, `get`,
 `put`, `delete`, `append`, `remove` or `replace` (see `apply_admin`), done
-under the server's lock so that they never cross a call's own changes. The state file (created with
+under the server's lock so that they never cross a call's own changes. With `--dns-port 53` it answers DNS for cabinets
+on a network card: `us.accessmerit.com` (and Merit's Prize Zone and Fantasy
+Sports hosts, `prizegames.com` and `cdmsports.com`) resolve to this server --
+10.0.2.2 when the question comes through an emulator's SLiRP, which reaches
+this machine there -- and other names as they resolve here. A Linux release on
+broadband (Sapphire on; see [Linux releases](#linux-releases)) in MegaPPBox's
+SLiRP network takes MANUAL settings: IP 10.0.2.15, netmask 255.255.255.0,
+gateway and DNS 10.0.2.2. The state file (created with
 a test tournament if missing) holds the following. It can be edited while the
 server runs: each call reads it again if it changed (an edit that does not
 parse is ignored until it does).
@@ -608,6 +615,11 @@ What the operator sets:
     logins carry the version): only for cabinets logging in with `version`;
     installed when one logs in with `becomes`
 
+- `megalink`: the Mega-Link switch's `rooms` (each `name`, `secret`, `max`
+  cabinets, `public`, `description`; a room without a secret takes cabinets
+  whose card has none), and for the public page `public_page`, `host` (what
+  players connect to) and `intro`. See [Mega-Link over the internet](#mega-link-over-the-internet).
+
 What the server keeps:
 
 - `players` (with `next_player_id`), `scores`: what the cabinets have sent.
@@ -617,6 +629,34 @@ What the server keeps:
 - `update_status` → update → machine serial: queued, checking, or the outcome.
 - `had`, `final`, `removed`, `players_sent`, `locations_sent`: what each
   cabinet has been given, so that nothing is sent twice.
+
+## Mega-Link over the internet
+
+Mega-Link is the cabinets' own Ethernet network, for head-to-head and linked
+games (MaxPlayers 0 and Linkable in `GAMEDATA.DAT`; the linked plays counted
+in the game statistics). MegaPPBox's **Remote Switch** network type
+(`src/network/net_switch.c`) carries it over UDP: every Ethernet frame the
+emulated card sends becomes one datagram to the switch's host and port (8086
+by default), and only datagrams from that address are taken back:
+
+    [SHA3-256 of the card's secret, 32 bytes, when it has one] + the frame
+
+An empty datagram every 20 seconds keeps a NAT mapping open, so players need
+no port forwarding. `megalink_switch.py` is the other end, run by
+`modem-server.py --switch-port 8086` with its rooms from the state file's
+`megalink` (or on its own: `python megalink_switch.py --room Main=secret`).
+Cabinets whose datagrams carry the same hash are one room, one Ethernet
+segment: a frame goes to the cabinet that owns its destination address once
+the switch has seen it, and to every other cabinet in the room when it is a
+broadcast or unknown. Frames pass through unchanged. A room holds `max`
+cabinets (8 by default); a cabinet silent for 60 seconds has left it.
+
+The switch notes each cabinet's card addresses and the IP addresses in its
+ARP and IP frames; the control panel shows them, and warns when two
+cabinets in a room claim one IP address (each needs its own, set in the
+cabinet's Ethernet setup). Its public page (`/megalink`) lists the rooms
+marked public, with their secret and how many cabinets are in them, but no
+addresses.
 
 ## Game numbers
 
@@ -763,6 +803,30 @@ cabinet's C:\ (PKSFX 2.04g's stub, then an ordinary zip).
 A transfer that breaks off leaves an incomplete self-extractor, which finds
 no zip directory and extracts nothing.
 
+## Linux releases
+
+Ruby onward run Linux; the game is `/usr/local/bin/start`, packed (not
+keyed): after a `0x01` byte at offset 6268 (Ruby, Sapphire 12.01: 6688; Jade,
+Crown: 6500), chunks of u32 length, u32, data, the data XORed with a stream of
+counter c: 0 when c % 20 == 0, else (c & 31) + (c & 15) + c % 20 + 35 (as
+Nicholas Navaroli's `unpack_dstart`). The unpacked program keeps its C++
+symbols (`CTournamaxxSocket::Process_*`).
+
+The client speaks the same protocol, on port 17751 only: the same commands
+(0x0011-0xFF11), larger reports. Logins: Ruby 2 V11.00 protocol 13, 167
+bytes; Jade 2 V15.10 protocol 21, 283 bytes. *Verified (Jade 2, broadband):
+every step to COMPLETE.* The cabinet sets its clock from the server's hello.
+
+It dials with `wvdial`/`pppd`, or, from Sapphire V12.01, uses its network
+card: the Dial-Up Network account type AUTOMATIC (DHCP: `IP=DYNAMIC` in
+`/var/config/network`, `dhcpcd`) or MANUAL (IP, netmask, gateway, DNS),
+`Configure_Network_Scripts`. Ruby has no broadband: its card is 10.128.0.129/8
+with no gateway, for Mega-Link, and it connects directly only when the server
+setting is a numeric address reachable there. After an update Jade 2 and later
+also call Prize Zone (`http://merit.prizegames.com`, from
+`config/APServers.ini`) and Fantasy Sports (`http://merit.cdmsports.com/`),
+which the server doesn't provide.
+
 ## Still open
 
-- The Linux MAXX releases (Ruby onward), which have their own client.
+- The Linux releases' reports (0x0202, 0x0212, 0x0222, 0x00C2 are larger).

@@ -1,0 +1,27 @@
+# TournaMAXX-Revival with Docker Compose (ZimaOS: App Store > Custom Install >
+# Import, and paste this).  See docs/zimaos.md.
+#
+# Before the first start, make the data folder and give it to the container's
+# user (UID 1000), in a terminal on the host:
+#
+#   sudo mkdir -p /DATA/AppData/tournamaxx && sudo chown 1000:1000 /DATA/AppData/tournamaxx
+#
+# Then open http://<host>:8480/ within 15 minutes to make the first user.
+
+name: tournamaxx
+services:
+  tournamaxx:
+    image: xeon3d/tournamaxx-revival:latest
+    container_name: tournamaxx
+    restart: unless-stopped
+    volumes:
+      - /DATA/AppData/tournamaxx:/data
+    ports:
+      - "8480:8080"          # the control panel and /megalink: point Nginx Proxy Manager here
+      - "2323:2323"          # the emulators' modem calls (TCP)
+      - "8086:8086/udp"      # the Mega-Link switch (UDP)
+      # - "15000:15000"      # TournaMAXX straight over TCP, only for cabinets whose
+      # - "17751:17751"      # us.accessmerit.com resolves to this host
+    environment:
+      TMX_SWITCH_PORT: "8086"
+      # TMX_ADMIN_PASSWORD: "..."  # instead of making the first user in the browser

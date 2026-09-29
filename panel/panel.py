@@ -19,8 +19,10 @@ The config (made with defaults if missing):
      "server_script": "../modem-server.py",
      "service": {"mode": "process"}        the panel runs the server itself
               | {"mode": "systemd", "unit": "tournamaxx"},
-     "server": {"port": 2323, "tcp_ports": [], "admin_port": 2324},
-     "secure_cookies": false,              true behind HTTPS
+     "server": {"port": 2323, "tcp_ports": [], "admin_port": 2324,
+                "switch_port": 0},         the Mega-Link switch's UDP port (0: off)
+     "secure_cookies": false,              true: always Secure (also when a proxy
+                                           sends X-Forwarded-Proto: https)
      "users": {"admin": "pbkdf2_sha256$..."}}
 
 In systemd mode the server's options go to <data_dir>/server.env, which
@@ -58,6 +60,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 MAX_UPLOAD = 64 * 1024 * 1024
 SESSION_HOURS = 12
+SETUP_MINUTES = 15        # a fresh install takes its first user this long after starting
+USER_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 CFG = None
 CFG_PATH = None
@@ -83,7 +87,7 @@ def default_config(path):
         "server_script": os.path.normpath(os.path.join(HERE, "..", "modem-server.py")),
         "mkupdate_script": os.path.normpath(os.path.join(HERE, "..", "mkupdate.py")),
         "service": {"mode": "process"},
-        "server": {"port": 2323, "tcp_ports": [], "admin_port": 2324},
+        "server": {"port": 2323, "tcp_ports": [], "admin_port": 2324, "switch_port": 0},
         "secure_cookies": False,
         "users": {},
     }
@@ -153,11 +157,37 @@ def new_session(user):
 def session_user(tok):
     with AUTH_LOCK:
         s = SESSIONS.get(tok or "")
-        if not s or s[1] < now():
+        if not s or s[1] < now() or s[0] not in CFG["users"]:
             SESSIONS.pop(tok or "", None)
             return None
         s[1] = now() + SESSION_HOURS * 3600
         return s[0]
+
+
+def end_sessions(user, keep=None):
+    """Log a user out everywhere (but the session KEEP)."""
+    with AUTH_LOCK:
+        for tok in [t for t, s in SESSIONS.items() if s[0] == user and t != keep]:
+            del SESSIONS[tok]
+
+
+STARTED = [0]
+
+
+def setup_state():
+    """First-run setup: open while there are no users, for SETUP_MINUTES after
+    the panel starts (restart it to open it again)."""
+    if CFG["users"]:
+        return {"needed": False, "open": False}
+    return {"needed": True, "open": now() < STARTED[0] + SETUP_MINUTES * 60,
+            "minutes": SETUP_MINUTES}
+
+
+def check_new_user(name, password):
+    if not USER_NAME.match(name or ""):
+        raise ValueError("a user name is 1-32 letters, digits, dots, dashes or underscores")
+    if len(password or "") < 10:
+        raise ValueError("use at least 10 characters")
 
 
 def throttled(addr):
@@ -197,6 +227,12 @@ def server_args():
         args += ["--tcp-ports", ",".join(str(p) for p in ports)]
     if s.get("admin_port"):
         args += ["--admin-port", str(int(s["admin_port"]))]
+    if s.get("switch_port"):
+        args += ["--switch-port", str(int(s["switch_port"]))]
+    if s.get("dns_port"):
+        args += ["--dns-port", str(int(s["dns_port"]))]
+        if s.get("dns_answer"):
+            args += ["--dns-answer", str(s["dns_answer"])]
     return args
 
 
@@ -366,6 +402,35 @@ def state_request(req):
 
 def get_state():
     return state_request({"op": "get"})
+
+
+def switch_status():
+    """The running Mega-Link switch's rooms and cabinets, or None."""
+    try:
+        return admin_request({"op": "switch"})
+    except (Offline, RuntimeError, ValueError, OSError):
+        return None
+
+
+def public_megalink(host):
+    """What the public Mega-Link page shows: the public rooms, how full they
+    are, and how to connect.  No addresses, nothing private."""
+    st = read_state_file()
+    ml = st.get("megalink", {})
+    status = switch_status()
+    live = {r["name"]: r for r in (status or {}).get("rooms", [])}
+    port = int(CFG["server"].get("switch_port") or 0)
+    rooms = []
+    for r in ml.get("rooms", []):
+        if not r.get("public"):
+            continue
+        cabs = live.get(r.get("name"), {}).get("cabinets", [])
+        rooms.append({"name": r.get("name", ""), "description": r.get("description", ""),
+                      "secret": r.get("secret", ""), "max": int(r.get("max") or 8),
+                      "cabinets": [{"since": c["since"]} for c in cabs]})
+    return {"enabled": bool(ml.get("public_page")), "online": port > 0 and status is not None,
+            "host": ml.get("host") or host, "port": port, "intro": ml.get("intro", ""),
+            "rooms": rooms, "now": now()}
 
 
 # ------------------------------------------------------------------ backups
@@ -731,6 +796,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(403, {"error": "missing request header"})
             if path == "/api/login" and method == "POST":
                 return self.login()
+            if path == "/api/setup":
+                return self.first_run(method)
+            if path == "/api/public/megalink" and method == "GET":
+                res = public_megalink((self.headers.get("Host") or "").split(":")[0])
+                if not res["enabled"]:
+                    return self.send(404, {"error": "the Mega-Link page is off"})
+                return self.send(200, res)
             user = session_user(self.cookie("tmx"))
             if user is None:
                 return self.send(401, {"error": "not logged in"})
@@ -747,6 +819,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def static(self, path):
         if path in ("/", ""):
             path = "/index.html"
+        elif path in ("/megalink", "/megalink/"):
+            path = "/megalink.html"
         p = os.path.normpath(os.path.join(STATIC, path.lstrip("/")))
         if not p.startswith(STATIC + os.sep) or not os.path.isfile(p):
             return self.send(404, "not found", "text/plain")
@@ -774,11 +848,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(1)
             return self.send(401, {"error": "wrong user name or password"})
         FAILS.pop(addr, None)
-        tok = new_session(req["user"])
-        flags = "; Secure" if CFG.get("secure_cookies") else ""
-        self.send(200, {"user": req["user"]}, headers=[
+        self.start_session(req["user"])
+
+    def start_session(self, user):
+        tok = new_session(user)
+        # Secure when configured, or when a proxy says the browser came over HTTPS.
+        https = CFG.get("secure_cookies") or self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        flags = "; Secure" if https else ""
+        self.send(200, {"user": user}, headers=[
             ("Set-Cookie", "tmx=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s" %
              (tok, SESSION_HOURS * 3600, flags))])
+
+    def first_run(self, method):
+        """GET: whether the first user is still to be made; POST: make it."""
+        st = setup_state()
+        if method != "POST":
+            return self.send(200, st)
+        if not st["needed"]:
+            return self.send(403, {"error": "the panel already has users: log in"})
+        if not st["open"]:
+            return self.send(403, {"error": "first-run setup closed %d minutes after the panel started: "
+                                            "restart the panel (or the container) to open it again" % SETUP_MINUTES})
+        req = self.json_body()
+        check_new_user(req.get("user"), req.get("password"))
+        with CFG_LOCK:
+            if CFG["users"]:
+                return self.send(403, {"error": "someone else made the first user just now"})
+            CFG["users"][req["user"]] = hash_password(req["password"])
+            save_config()
+        print("first user made: %s" % req["user"], flush=True)
+        self.start_session(req["user"])
 
     def post_logout(self, qs):
         with AUTH_LOCK:
@@ -926,12 +1025,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         port = int(req.get("port", s["port"]))
         tcp = [int(p) for p in req.get("tcp_ports", s.get("tcp_ports", []))]
         admin = int(req.get("admin_port", s.get("admin_port", 2324)))
-        for p in [port, admin] + tcp:
+        switch = int(req.get("switch_port", s.get("switch_port", 0)) or 0)
+        dns = int(req.get("dns_port", s.get("dns_port", 0)) or 0)
+        dns_answer = str(req.get("dns_answer", s.get("dns_answer", "")) or "").strip()
+        if dns_answer:
+            socket.inet_aton(dns_answer)          # OSError on a bad address: the request fails
+        for p in [port, admin] + tcp + [x for x in (switch, dns) if x]:
             if not 1 <= p <= 65535:
                 raise ValueError("port %d out of range" % p)
         if len({port, admin, *tcp}) != 2 + len(tcp):
-            raise ValueError("every port must be different")
-        s.update(port=port, tcp_ports=tcp, admin_port=admin)
+            raise ValueError("every TCP port must be different")
+        s.update(port=port, tcp_ports=tcp, admin_port=admin, switch_port=switch, dns_port=dns, dns_answer=dns_answer)
         with CFG_LOCK:
             CFG["server"] = s
             save_config()
@@ -942,6 +1046,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             restarted = True
         return {"server": s, "restarted": restarted}
 
+    # -------------------------------------------------------------- Mega-Link
+    def get_megalink(self, qs):
+        st = get_state()
+        return {"config": st.get("megalink", {}), "switch_port": int(CFG["server"].get("switch_port") or 0),
+                "status": switch_status(), "running": SERVICE.status()["active"]}
+
     def post_password(self, qs):
         req = self.json_body()
         if not check_password(req.get("old", ""), CFG["users"].get(self.user, "")):
@@ -951,7 +1061,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with CFG_LOCK:
             CFG["users"][self.user] = hash_password(req["new"])
             save_config()
+        end_sessions(self.user, keep=self.cookie("tmx"))
         return {"ok": True}
+
+    # -------------------------------------------------------------- users
+    def get_users(self, qs):
+        return {"users": [{"name": u, "you": u == self.user} for u in sorted(CFG["users"])]}
+
+    def post_users_add(self, qs):
+        req = self.json_body()
+        check_new_user(req.get("user"), req.get("password"))
+        with CFG_LOCK:
+            if req["user"] in CFG["users"]:
+                raise ValueError("there is already a user %s" % req["user"])
+            CFG["users"][req["user"]] = hash_password(req["password"])
+            save_config()
+        return self.get_users(qs)
+
+    def post_users_password(self, qs):
+        """Set another user's password (yours: under Your password)."""
+        req = self.json_body()
+        if req.get("user") not in CFG["users"]:
+            raise ValueError("no such user")
+        check_new_user(req["user"], req.get("password"))
+        with CFG_LOCK:
+            CFG["users"][req["user"]] = hash_password(req["password"])
+            save_config()
+        end_sessions(req["user"], keep=self.cookie("tmx"))
+        return self.get_users(qs)
+
+    def post_users_delete(self, qs):
+        name = self.json_body().get("user")
+        if name == self.user:
+            raise ValueError("you cannot delete yourself")
+        with CFG_LOCK:
+            if name not in CFG["users"]:
+                raise ValueError("no such user")
+            if len(CFG["users"]) == 1:
+                raise ValueError("the last user cannot be deleted")
+            del CFG["users"][name]
+            save_config()
+        end_sessions(name)
+        return self.get_users(qs)
 
 
 def main():
@@ -964,14 +1115,18 @@ def main():
     os.makedirs(CFG["data_dir"], exist_ok=True)
     if a.set_password:
         pw = os.environ.get("TMX_PASSWORD") or getpass.getpass("Password for %s: " % a.set_password)
-        if len(pw) < 10:
-            sys.exit("use at least 10 characters")
+        try:
+            check_new_user(a.set_password, pw)
+        except ValueError as e:
+            sys.exit(str(e))
         CFG["users"][a.set_password] = hash_password(pw)
         save_config()
         print("password set for %s" % a.set_password)
         return
+    STARTED[0] = now()
     if not CFG["users"]:
-        sys.exit("no users yet: run with --set-password admin first")
+        print("no users yet: open the panel within %d minutes to make the first one "
+              "(or run with --set-password NAME)" % SETUP_MINUTES, flush=True)
     svc = CFG["service"]
     SERVICE = SystemdService(svc.get("unit", "tournamaxx")) if svc.get("mode") == "systemd" else ProcessService()
     if svc.get("mode") != "systemd" and svc.get("autostart", True):
