@@ -827,6 +827,74 @@ also call Prize Zone (`http://merit.prizegames.com`, from
 `config/APServers.ini`) and Fantasy Sports (`http://merit.cdmsports.com/`),
 which the server doesn't provide.
 
+### Linux reports (Jade 2 V15.10)
+
+Offsets in the body (after the 4-byte header), as the handlers build them.
+*Verified: decoded from a call.*
+
+- **0x0202** (3181 bytes, `Process_Setup_Options_Request`): the settings
+  come from NVRAM's **option table**, 80 bytes at NVRAM +0x8E:
+
+      +000 u8 ×13 as DOS: adult games, nudity, full nude, adult on / off
+                  hours, attract, volume (0-127), 6 Star and its five screens
+      +00D u32  the 6 Star PIN (DOS: u16)
+      +011 u8   adult content    +012 u8  AC level (bits 2-4 of NVRAM +0x467)
+      +113 u8×88  NVRAM +0x8E..+0xE5, raw (the option table and 8 more)
+      +173 char   a float as text, "%12.6e" (0.25: the coin value)
+      +182 u32    NVRAM +0x15358, plus 1
+      +186 char   the currency format ("&#36;%d")
+      +21C 6 × 354 bytes: connection accounts: +1 type (0: none), +2 flags,
+                  +3 phone[120], +7B login[100], +DF password[100],
+                  +143 DNS1[16], +153 DNS2[15]
+      +A69 u8     option 21     +A6A u8 a flag (OR'd in on a set)
+      +A6F        (index, value) pairs: the option table's 80 bytes, then
+                  (0xFE, volume in percent); 0xFF pads
+
+  A 0x0201 sets the same way: the fields, the accounts, and the pairs --
+  each (index, value) stored at NVRAM +0x8E + index, except 0xFE (the
+  volume, 1-100) and 0x37 (classic mode, which also makes or removes
+  `/var/config/classic`). The option table's indexes, as the report's own
+  fields and the code that reads them show: 8 adult games, 13 6 Star, 23
+  adult content, 26-28 and 37 and 50 the 6 Star screens, 30 nudity, 31 full
+  nude, 55 classic mode; the others are named in the panel by what reads
+  them (TournaMAXX, Merit Money, replays, lease mode, Prize Zone, ...).
+- **0x0212** (360 bytes): the DOS (game, credits) pairs, for 180 games. The
+  game numbers are the order of `config/gamedata.dat` (the panel carries
+  Jade 2's list). *Verified: a Tai-Play game reported as #20.*
+- **0x0222** (363 bytes, `Process_Dialing_Options_Request`): the DOS layout
+  to +0x136 (the access number holds the account type: AUTOMATIC, MANUAL or a
+  number), then:
+
+      +137 u32  seconds (1 to 90 days; 1800)
+      +13B char IP[16]        a MANUAL account's address
+      +14B char GATEWAY[16]   and gateway (the others: empty)
+      +15B      16 bytes, unused
+
+  A 0x0221 carrying one sets them the same way.
+- **0x00C2 / 0x00C3** (3010 bytes, `Process_Books_Request`): current
+  period / lifetime. Credit types are those of `AmuseCreditsDB`: 0 total
+  (money in) and 1 free, as the audit labels them; 2, 3 and 4 are added only
+  by older paths (`OldAddCreditsToBooks` and `StartGame`, `OldUseMeritMoney`,
+  `OldUseCredits`), and a normal play or a tournament play adds to none of
+  them. *Verified: a regular game (plays, credits, share, times, players)
+  and a tournament game (only the TournaMAXX counts and the month).*
+
+      +000 u16  games listed
+      +002 u32  credits type 0   +006 type 1   +00A type 2
+      +00E u32  +012 u32         (unknown)
+      +016 u16×6 meter pulses
+      +022 u32  TournaMAXX games (NTNVRAM +0x114 / +0x110)
+      +026 u32  their credits    (+0x11C / +0x118)
+      +02A      0x00C3: this and last month's tournament credits, as DOS
+      +03A 23 bytes × 128   the games, as DOS's entries (credits and plays
+                            summed over game types 0, 7 and linked 1); the
+                            slots not used are 0xFF
+      +BBA u32  credits type 4   +BBE u32 credits type 3
+
+- **0x00E2** (266 bytes, `Process_Comm_Log_Request`): 14 calls of 19 bytes:
+  u32 start, u32 (between), u32 end, u8 status, u8 error, u8, u32.
+
 ## Still open
 
-- The Linux releases' reports (0x0202, 0x0212, 0x0222, 0x00C2 are larger).
+- The meaning of most of a Linux release's option table; the reports of the
+  Linux releases other than Jade 2 (not seen yet).

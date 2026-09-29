@@ -116,9 +116,43 @@ const GAMES_OLDER = {
     64: "GEM SWIPE", 66: "SPEED CHESS" },
   3: { 34: "B-BRICKS", 36: "JOEPARDY", 52: "BASEBALL", 53: "DRIVE" },
 };
+// A Linux release's game numbers (login protocol 13 on): the order of
+// config/gamedata.dat, from Jade 2 V15.10.
+const GAMES_LINUX = [
+  "GREAT SOLITAIRE", "RUN21", "ROYAL FLASH", "TRIVIA", "MATCHEMUP", "MEMOREE", "TRI-TOWERS", "FOURPLAY",
+  "CONQUEST", "STRIPCLUB", "ELEVEN UP", "MYST. PHRAZE", "HOOP JONES", "ZIP21", "CHECKERZ", "QUIK MATCH",
+  "PWR SOLITAIRE", "PIX MIX", "PHOTOHUNT", "QUICKCELL", "TAI-PLAY", "GOLF", "TENNIS", "PUCK SHOT", "PILE-ON",
+  "TAKE 2", "DBL SOLITAIRE", "LINK TRIVIA", "TRI-CASTLES", "ELEVEN BALL", "CHUG21", "PAIR OFF", "HOOTER",
+  "POWER TRIVIA", "H2H PHUNT", "TRIPFLIP", "H2H TRIVIA", "3 SOME", "LONESTAR", "SUPER LONESTAR", "FASTLANE",
+  "SNAPSHOT", "LOOK OUT", "MONSTER MADNESS", "GOOOAL", "AIR SHOT", "PHARAOH'S NINE", "PILEHIGH", "WILD 8's",
+  "QB ZONE", "WILD APE's", "QUINTZEE", "DDC JUMBLEX", "DDC JUMBLE", "ASTRO JOE", "WORD SAFARI",
+  "OUTER SPADES", "CRAZY HEARTS", "QUIZ SHOW", "BOXXI", "FOXY BOXXI", "MOONDROP", "EUCHRE NIGHTS",
+  "BATTLE 31", "BOX GLIDE", "BACK JAMMIN", "QUIK CHESS", "GENDER BENDER", "BOWLING", "QUIZ SHOW HT",
+  "CHIPAWAY", "SPEED DRAW", "FLASH 7", "EROTIC MATCH'EM UP", "EROTIC MEMOREE", "EROTIC MYST. PHRAZE",
+  "EROTIC PIX MIX", "EROTIC PHOTOHUNT", "EROTIC LOOK OUT", "EROTIC TRIVIA", "EROTIC POWER TRIVIA",
+  "SUPER SNUBBEL", "EROTIC H2H PHUNT", "MYST. PHRAZE HT", "H2H GENDERBENDER", "H2H SAFARI", "WORDSTER",
+  "ESP RUN", "LET IT RIDE POKER", "LET IT RIDE TRIVIA", "SKAT", "ESP WAR", "QSHOT", "PRO SPORTS H2H TRIVIA",
+  "PRO-SPORTS MYST. PHRAZE", "PRO SPORTS WORD SAFARI", "PRO SPORTS QUIZ SHOW", "JUMBLEX", "JUMBLE",
+  "TAKE IT BACK TRIVIA", "TAKE IT BACK", "MAGIC CHARMS", "BIGTIME ROLLER", "CARD BANDITS", "TRIVIA TREASURE",
+  "MAGIC CHARMS LE", "GINRUMMY", "CASTLE BANDITS", "WORD DOJO", "WORDSERVE", "Rack 'Em", "DOMINO 5",
+  "BATTLE COMMAND", "PREM EROTIC PHOTOHUNT", "PREM EROTIC LOOKOUT", "PREM EROTIC BOXXI", "POM BOXXI",
+  "CARD MERIT-THON", "STRATEGY MERIT-THON", "QUIZ MERIT-THON", "MULTI MERIT-THON", "QUIZ MERIT-THON",
+  "FUNKY MONKEY", "PHARAOH'S FORTUNE", "PRO SPORTS PHARAOH'S FORTUNE", "TMAXX MERIT-THON 1",
+  "TMAXX MERIT-THON 2", "TMAXX MERIT-THON 3", "TMAXX MERIT-THON 4", "TMAXX MERIT-THON 5",
+  "TMAXX MERIT-THON 6", "TMAXX MERIT-THON 7", "TMAXX MERIT-THON 8", "TMAXX MERIT-THON 9",
+  "TMAXX MERIT-THON 10", "TMAXX MERIT-THON 11", "TMAXX MERIT-THON 12", "TMAXX MERIT-THON 13",
+  "TMAXX MERIT-THON 14", "TMAXX MERIT-THON 15", "TMAXX MERIT-THON 16", "TMAXX MERIT-THON 17",
+  "TMAXX MERIT-THON 18", "TMAXX MERIT-THON 19", "TMAXX MERIT-THON 20", "KIDS' KOLORTIME",
+  "MEGATOUCH SWITCHEROO", "KIDS' PHOTO HUNT", "TIC A TAC 21", "CARD RAIDERS", "CRYPT RAIDERS",
+  "TIC TAC TRIVIA", "METEOR SHOWER", "VINCI-BALL", "WORD FEVER", "Rack 'Em 9 Ball", "PUZZLE MERIT-THON",
+  "TV GUIDE CROSSWORDS", "RACE POKER", "BOX DROP", "MOTOR MATCH", "MegaTouch Mini-Golf",
+  "Fantasy Sports FootBall", "PREM EROTIC PIXMIX", "CHIPPENDALES PHOTOHUNT", "CHIPPENDALES LOOKOUT",
+  "CHIPPENDALES BOXXI", "CHIPPENDALES PIXMIX", "COM BOXXI", "EROTIC CARD BANDITS", "EROTIC CASTLE BANDITS",
+  "Classic Fantasy Sports", "TOUCHTUNES!", "CHAIN EROTIC BOXXI", "CHAIN EROTIC LOOKOUT",
+  "CHAIN EROTIC PIXMIX", "CHAIN CARD BANDITS", "CHAIN TRIVIA", "TEXAS HOLD 'EM", "MENUITAIRE!"];
 // A game's name on a cabinet with that login protocol (none: Emerald 2's).
 const gameName = (g, protocol) => {
-  const n = GAMES_OLDER[protocol]?.[g] ?? GAMES[g];
+  const n = protocol >= 13 ? GAMES_LINUX[g] : (GAMES_OLDER[protocol]?.[g] ?? GAMES[g]);
   return n ? `${n} (#${g})` : `Game #${g}`;
 };
 
@@ -636,7 +670,39 @@ function needsReport(r, what) {
     "They are read at the end of every update call (Emerald and Emerald 2 only); changes are built on that reading.");
 }
 
+// A Linux release's operator settings, as read (changing them is not built
+// yet: a 0x0201 sets its option table by (index, value) pairs).
+function cabSettingsLinux(r) {
+  if (!r?.decoded) return needsReport(r, "operator settings");
+  const d = r.decoded;
+  const yn = (v) => (v ? "on" : "off");
+  const adult = ["off", "on", "on between hours"][d.adult_mode] ?? d.adult_mode;
+  const dl = (rows) => el("dl", { class: "kv" }, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, String(v))]));
+  const opts = el("div", { class: "table-wrap" }, el("table", {},
+    el("thead", {}, el("tr", {}, el("th", {}, "Index"), el("th", {}, "Value"), el("th", {}, "What it sets"))),
+    el("tbody", {}, d.options.map((v, i) => el("tr", {}, el("td", { class: "num" }, i), el("td", { class: "num" }, v ?? "—"),
+      el("td", {}, d.option_names[i] || el("span", { class: "muted" }, "?")))))));
+  return el("div", { class: "stack" },
+    el("p", { class: "muted" }, `As read ${fmtTime(r.at)}. Changing a Linux release's settings from here is not built yet.`),
+    el("div", { class: "grid cols-2" },
+      el("div", { class: "card stack" }, el("h3", {}, "Settings"), dl([
+        ["Adult games", adult], ["Adult hours", `${pad(d.adult_from)}:00 – ${pad(d.adult_to)}:00`],
+        ["Nudity", yn(d.nudity)], ["Full nude", yn(d.fullnude)], ["Adult content", yn(d.adult_content)], ["AC level", d.ac_level],
+        ["Volume", `${d.volume}%`], ["Coin value", Number(d.coin_value)], ["Currency format", d.currency]])),
+      el("div", { class: "card stack" }, el("h3", {}, "6 Star"), dl([
+        ["6 Star", yn(d.six_star)], ["PIN", d.six_star_pin], ["High scores", yn(d.six_star_scores)],
+        ["Video billboard", yn(d.six_star_billboard)], ["Volume control", yn(d.six_star_volume)],
+        ["Screen calibration", yn(d.six_star_calibration)], ["Update from server", yn(d.six_star_update)]]))),
+    d.accounts.length ? el("div", { class: "card stack" }, el("h3", {}, "Connection accounts"),
+      table(["Type", "Flags", "Phone", "Login", "DNS 1", "DNS 2"], d.accounts.map((a) => el("tr", {},
+        el("td", {}, a.type), el("td", {}, a.flags), el("td", {}, a.phone.trim() || "—"), el("td", {}, a.login.trim() || "—"),
+        el("td", {}, a.dns1 || "—"), el("td", {}, a.dns2 || "—"))))) : null,
+    el("div", { class: "card stack" }, el("h3", {}, "Option table (NVRAM +0x8E)"),
+      el("p", { class: "muted" }, "Every option byte the cabinet reports; the named ones are those the settings above are read from."), opts));
+}
+
 function cabSettings(serial, r, login) {
+  if (login.protocol >= 13) return cabSettingsLinux(r);
   if (login.protocol && ![7, 9].includes(login.protocol)) return el("div", { class: "note" }, "This release has no operator settings over the network.");
   if (!r?.decoded) return needsReport(r, "operator settings");
   const d = r.decoded;
@@ -726,6 +792,8 @@ function cabDialup(serial, r) {
   const d = r.decoded;
   const f = el("form", { class: "stack" },
     el("p", { class: "muted" }, `The Dial-Up Network screen, as read ${fmtTime(r.at)}.`),
+    d.account ? el("p", {}, `Connection: ${d.account}`, d.ip ? ` · IP ${d.ip}` : "", d.gateway ? ` · gateway ${d.gateway}` : "",
+      el("small", { class: "muted" }, " (the account type is the access number field: AUTOMATIC, MANUAL, or a phone number)")) : null,
     el("div", { class: "form" },
       field("Daily update hour", input("update_hour", d.update_hour, { type: "number", min: 0, max: 23 })),
       field("Access number", input("phone", d.phone, { maxlength: 40 })),
@@ -844,7 +912,10 @@ function cabReports(rep, protocol) {
     parts.push(el("h3", {}, label, rep[typ] ? ` (read ${fmtTime(rep[typ].at)})` : ""),
       d ? el("p", { class: "muted" },
         d.total_credits != null ? `Total credits ${d.total_credits} · ` : `Credits of the games below ${d.games_credits} · `,
-        `free ${d.free_credits} · played ${d.credits_played} · meter pulses ${d.meter_pulses.join(" / ")}`,
+        d.games_started != null
+          ? `free ${d.free_credits} · credit counts 2 / 3 / 4 (older paths) ${d.games_started} / ${d.merit_money} / ${d.credits_used} · `
+          : `free ${d.free_credits} · played ${d.credits_played} · `,
+        `meter pulses ${d.meter_pulses.join(" / ")}`,
         d.tournament_plays != null ? ` · TournaMAXX games ${d.tournament_plays} (${d.tournament_credits} credits)` : "",
         d.months?.length ? ` · tournament credits ${d.months.map((m) => `${m.year}-${String(m.month).padStart(2, "0")}: ${m.credits}`).join(", ")}` : "")
         : null,

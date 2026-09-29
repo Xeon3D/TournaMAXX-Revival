@@ -476,7 +476,69 @@ def ctext(b):
     return b.split(b"\0")[0].decode("latin1")
 
 
-def decode_0202(b):
+# The decoders take the report's bytes (without the 4 of the framing) and
+# whether the cabinet runs a Linux release (login protocol 13 or more: Ruby
+# on), whose reports are larger (docs/tournamaxx.md, "Linux releases").
+
+# A Linux release's option table (0x0202 +0xA6F): index -> what it sets.
+# Plain names: the report's own fields are read from these (Jade 2,
+# Process_Setup_Options_Request).  "used by": what reads the byte in the
+# program (a hint, not a confirmed meaning).
+LINUX_OPTIONS = {
+    0: "used by SetDefaultCurrencyValues", 1: "used by the link code (Link_InitLinkStruc)",
+    2: "used by CheckCoinlessOp, Idle", 4: "used by REPLAY_CheckForReplay",
+    5: "used by GetGamePriceString, CreatePrizeBucksTable", 7: "used by the link code",
+    8: "adult games", 9: "used by the link code", 11: "used by ShowAdverts, Idle",
+    12: "used by Tournament_Start, ApplyPriceInfo", 13: "6 Star", 15: "used by ResetCCOData",
+    19: "used by IsMeritMoneyActive", 20: "used by NTournSupported (TournaMAXX)",
+    21: "(also at +0xA69)", 22: "used by ChangeLanguage", 23: "adult content",
+    26: "6 Star: high scores", 27: "6 Star: video billboard", 28: "6 Star: volume",
+    30: "nudity", 31: "full nude", 32: "used by PrizeZoneOptions", 33: "used by the link code",
+    35: "used by ChangeLanguage", 36: "used by TournSupported", 37: "6 Star: calibration",
+    40: "used by CheckSexDependencies", 41: "used by Continue, ContPayTable", 42: "used by ShowMyMeritData",
+    47: "used by SetGamePriceAndStatusFromKey", 48: "used by AdjustTime", 49: "used by IsLeaseModeOn",
+    50: "6 Star: update from server", 51: "used by IsPromoCreditActive",
+    52: "used by CheckMegaLink, UpdateNumUnitsLinked", 53: "used by CreateHighScores",
+    55: "classic mode (SwitchVideoMode; a 0x0201 also sets /var/config/classic)",
+    57: "used by PrizeZoneIsEnabled", 58: "used by CheckSexDependencies, FindGameInCategory",
+    61: "used by BuildCoinlessDialog", 62: "used by DDCGameActive", 67: "used by SetGamePriceAndStatusFromKey",
+    68: "used by IsShowTendersActive", 69: "used by CDM_Supported (Fantasy Sports)",
+    70: "used by Process_Ad_Impressions_Request", 71: "used by the rankings screens",
+}
+
+
+def decode_0202_linux(b):
+    """A Linux release's operator settings (Jade 2, 3181 bytes;
+    Process_Setup_Options_Request).  The fields are taken from the NVRAM
+    option table (80 bytes at NVRAM +0x8E), which the report also carries
+    whole, raw at +0x113 and as (index, value) pairs at +0xA6F -- the form a
+    0x0201 sets them in; index 0xFE is the volume in percent."""
+    f = lambda a, n: ctext(b[a:a + n])
+    pairs = {b[i]: b[i + 1] for i in range(0xA6F, len(b) - 1, 2) if b[i] != 0xFF}
+    accounts = []
+    for k in range(6):
+        o = 0x21C + 0x162 * k
+        if b[o + 1]:
+            accounts.append({"type": b[o + 1], "flags": b[o + 2], "phone": f(o + 3, 120),
+                             "login": f(o + 0x7B, 100), "password": f(o + 0xDF, 100),
+                             "dns1": f(o + 0x143, 16), "dns2": f(o + 0x153, 15)})
+    return {
+        "adult_mode": b[0], "nudity": b[1], "fullnude": b[2], "adult_from": b[3], "adult_to": b[4],
+        "adult_attract": b[5], "volume_level": b[6], "volume": pairs.get(0xFE, b[6] * 100 // 127),
+        "six_star": b[7], "six_star_scores": b[8], "six_star_billboard": b[9], "six_star_volume": b[10],
+        "six_star_calibration": b[11], "six_star_update": b[12],
+        "six_star_pin": struct.unpack("<I", b[13:17])[0], "adult_content": b[17], "ac_level": b[18],
+        "coin_value": f(0x173, 15), "currency": f(0x186, 24).replace("&#36;", "$"),
+        "options": [pairs.get(i) for i in range(80)],
+        "option_names": {str(k): v for k, v in LINUX_OPTIONS.items()},
+        "accounts": accounts, "linux": True,
+    }
+
+
+def decode_0202(b, linux=False):
+    """The operator settings (DOS: 285 bytes)."""
+    if linux and len(b) >= 0xA6F:
+        return decode_0202_linux(b)
     if len(b) < 0x11:
         return None
     return {
@@ -488,7 +550,7 @@ def decode_0202(b):
     }
 
 
-def decode_0212(b):
+def decode_0212(b, linux=False):
     prices = {}
     for i in range(0, len(b) - 1, 2):
         if b[i] or b[i + 1]:
@@ -496,17 +558,35 @@ def decode_0212(b):
     return {"prices": prices}
 
 
-def decode_0222(b):
+def decode_0222(b, linux=False):
+    """The Dial-Up Network settings.  A Linux release adds, after the hour and
+    three option bytes, a u32 (seconds), and for a MANUAL broadband account
+    its IP address and gateway; its "phone" is then the account type
+    (AUTOMATIC: DHCP, MANUAL: fixed address, else a dial-up number)."""
     if len(b) < 0x134:
         return None
     f = lambda a, n: ctext(b[a:a + n])
-    return {"init": f(0x000, 100), "prefix": f(0x064, 11), "phone": f(0x06F, 41), "login": f(0x098, 41),
-            "password": f(0x0C1, 41), "server": f(0x0EA, 41), "dns1": f(0x113, 16), "dns2": f(0x123, 16),
-            "update_hour": b[0x133]}
+    out = {"init": f(0x000, 100), "prefix": f(0x064, 11), "phone": f(0x06F, 41), "login": f(0x098, 41),
+           "password": f(0x0C1, 41), "server": f(0x0EA, 41), "dns1": f(0x113, 16), "dns2": f(0x123, 16),
+           "update_hour": b[0x133]}
+    if len(b) >= 0x15B:
+        out.update(options=list(b[0x134:0x137]), seconds=struct.unpack("<I", b[0x137:0x13B])[0],
+                   ip=f(0x13B, 16), gateway=f(0x14B, 16),
+                   account={"AUTOMATIC": "broadband (DHCP)", "MANUAL": "broadband (fixed address)"}.get(
+                       out["phone"], "dial-up"))
+    return out
 
 
-def decode_00E2(b):
+def decode_00E2(b, linux=False):
+    """The last 14 calls.  A Linux release's records are 19 bytes: u32 start,
+    u32 (an intermediate time), u32 end, u8 status, u8 error, u8, u32."""
     calls = []
+    if linux:
+        for i in range(0, len(b) - 18, 19):
+            start, mid, end, status, err = struct.unpack("<IIIBB", b[i:i + 14])
+            if start:
+                calls.append({"start": start, "end": end or mid, "status": status, "error": err})
+        return {"calls": calls}
     for i in range(0, len(b) - 13, 14):
         start, end, status, err = struct.unpack("<IIBB", b[i:i + 10])
         if start:
@@ -514,7 +594,7 @@ def decode_00E2(b):
     return {"calls": calls}
 
 
-def decode_00CA(b):
+def decode_00CA(b, linux=False):
     names = {3: "coins", 0x21: "bills"}
     rows = []
     for i in range(0, len(b) - 13, 14):
@@ -524,7 +604,39 @@ def decode_00CA(b):
     return {"counters": rows}
 
 
-def decode_stats(b):
+LINUX_STATS = 3010      # a Linux release's 0x00C2 / 0x00C3 (Jade 2), without the framing
+
+
+def decode_stats_linux(b):
+    """A Linux release's 0x00C2 / 0x00C3 (Jade 2, 0x00C1 handler
+    Process_Books_Request): a 58-byte header, then 128 slots of 23 bytes for
+    the games (the first u16-count of them used, the rest 0xFF), then two u32
+    credit counts.  Credit types: 0 total (money in), 1 free (the cabinet's
+    audit labels these two); 2, 3 and 4 are added only by older paths
+    (OldAddCreditsToBooks / StartGame, OldUseMeritMoney, OldUseCredits) --
+    a normal play adds to neither (Jade 2)."""
+    games_n, total, free, started, unk_a, unk_b = struct.unpack("<HIIIII", b[:22])
+    meters = list(struct.unpack("<6H", b[22:34]))
+    t_plays, t_credits = struct.unpack("<II", b[34:42])
+    y1, m1, c1, y2, m2, c2 = struct.unpack("<HHIHHI", b[42:58])
+    used, merit = struct.unpack("<II", b[3002:3010])
+    games = []
+    for k in range(min(games_n, 128)):
+        i = 58 + 23 * k
+        g, price, share, plays, credits, short, long_, avg, *by = struct.unpack("<BBBHHHHH5H", b[i:i + 23])
+        games.append({"game": g, "price": price, "share": share, "plays": plays, "credits": credits,
+                      "shortest": short, "longest": long_, "average": avg,
+                      "linked": by[0], "by_players": by[1:]})
+    return {"total_credits": total, "free_credits": free, "games_started": started,
+            "credits_used": used, "merit_money": merit, "meter_pulses": meters,
+            "tournament_plays": t_plays, "tournament_credits": t_credits,
+            "months": [{"year": y, "month": m, "credits": c} for y, m, c in ((y1, m1, c1), (y2, m2, c2)) if m],
+            "unknown": [unk_a, unk_b], "games": games}
+
+
+def decode_stats(b, linux=False):
+    if linux and len(b) == LINUX_STATS:
+        return decode_stats_linux(b)
     """0x00C2 / 0x00C3: the message's first 54 bytes are its header (here
     without the 4 of the framing, like every report kept): u16 games, u32
     total, free and played credits, u16 x6 meter pulses, u32 TournaMAXX
@@ -568,10 +680,11 @@ DECODERS = {"0202": decode_0202, "0212": decode_0212, "0222": decode_0222, "00E2
 
 def latest_reports(state, serial):
     out = {}
+    linux = (state.get("logins", {}).get(serial, {}).get("protocol") or 0) >= 13
     for r in state.get("reports", {}).get(serial, []):
         dec = DECODERS.get(r.get("type"))
         try:
-            d = dec(bytes.fromhex(r["raw"])) if dec else None
+            d = dec(bytes.fromhex(r["raw"]), linux) if dec else None
         except (ValueError, struct.error):
             d = None
         out[r["type"]] = {"at": r.get("at"), "decoded": d, "raw": r["raw"][:4096]}
