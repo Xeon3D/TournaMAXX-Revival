@@ -26,10 +26,10 @@ ENV PYTHONUNBUFFERED=1 \
     TMX_DATA=/data
 
 # Read-only code, whatever the permissions of the checkout it is built from.
-COPY --chmod=u=rwX,go=rX modem-server.py megalink_switch.py mkupdate.py LICENSE README.md /app/
+COPY --chmod=u=rwX,go=rX VERSION modem-server.py megalink_switch.py mkupdate.py LICENSE README.md /app/
 COPY --chmod=u=rwX,go=rX panel/ /app/panel/
 COPY --chmod=u=rwX,go=rX docs/ /app/docs/
-COPY --chmod=u=rwX,go=rX docker/entrypoint.py /app/docker/entrypoint.py
+COPY --chmod=u=rwX,go=rX docker/entrypoint.py docker/updater.py /app/docker/
 # /data, owned by the user the image runs as.
 COPY --chown=1000:1000 --chmod=u=rwX,go=rX docker/data/ /data/
 

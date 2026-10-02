@@ -124,6 +124,21 @@ address.
 
 ## Updating
 
-Pull the new image and recreate the container (ZimaOS: the app's settings >
-update, or `docker compose pull && docker compose up -d`). Everything in
-`/DATA/AppData/tournamaxx` stays.
+The compose file has a second service, `updater` (container
+`tournamaxx-updater`). With it, the panel's **Settings > Updates** shows an
+**Update** button when a new release is out: the updater pulls the new image,
+recreates the `tournamaxx` container with the same settings, and puts the old
+one back if the new one does not come up healthy. It has the Docker socket
+(which is as good as root on the ZimaOS box), so it runs apart from the panel
+and only ever pulls `xeon3d/tournamaxx-revival`, taking nothing but a version
+number from the panel. Leave the service out if you would rather not give it
+that, and update by hand.
+
+By hand: pull the new image and recreate the containers (ZimaOS: the app's
+settings > update, or `docker compose pull && docker compose up -d`). That
+also updates the updater itself, which the button does not.
+
+Either way, everything in `/DATA/AppData/tournamaxx` stays.
+
+An install from before the updater (0.1.0) has no button yet: import the
+new compose file (or add its `updater` service), and update by hand once.

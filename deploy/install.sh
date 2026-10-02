@@ -9,6 +9,8 @@
 #   --email ADDR    for Let's Encrypt's expiry notices
 #   --no-tls        skip the certificate (the panel is then plain HTTP:
 #                   only for trying it out)
+#   --update        the options of the last install (/etc/tournamaxx/install.conf);
+#                   what the panel's updater runs (deploy/update.py)
 #
 # Running it again updates the code and keeps the data, config and password.
 #
@@ -19,21 +21,31 @@
 #   tournamaxx.service         the server, as user tournamaxx
 #   tournamaxx-panel.service   the panel on 127.0.0.1:8080, behind nginx
 #   /etc/sudoers.d/tournamaxx  lets the panel start/stop/restart the server
+#   tournamaxx-update.path     installs a release when the panel asks
+#                              (Settings > Updates), as root: deploy/update.py
+#   /etc/tournamaxx/install.conf  these options, for --update
 #   /etc/logrotate.d/tournamaxx
 set -eu
 
 DOMAIN=""
 EMAIL=""
 TLS=1
+UPDATE=0
+CONF=/etc/tournamaxx/install.conf
 while [ $# -gt 0 ]; do
     case "$1" in
         --domain) DOMAIN="$2"; shift 2 ;;
         --email) EMAIL="$2"; shift 2 ;;
         --no-tls) TLS=0; shift ;;
+        --update) UPDATE=1; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo sh deploy/install.sh ...)" >&2; exit 1; }
+if [ "$UPDATE" = 1 ]; then
+    [ -f "$CONF" ] || { echo "--update: no $CONF (run it once with --domain)" >&2; exit 2; }
+    . "$CONF"
+fi
 [ -n "$DOMAIN" ] || { echo "--domain is needed" >&2; exit 2; }
 if [ "$TLS" = 1 ] && [ -z "$EMAIL" ]; then
     echo "--email is needed for the certificate (or --no-tls)" >&2; exit 2
@@ -55,9 +67,12 @@ id tournamaxx >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /us
 install -d -o tournamaxx -g tournamaxx -m 750 "$DATA"
 install -d -m 755 "$APP"
 
+install -d -m 755 /etc/tournamaxx
+printf "DOMAIN='%s'\nEMAIL='%s'\nTLS=%s\n" "$DOMAIN" "$EMAIL" "$TLS" > "$CONF"
+
 say "code -> $APP"
 rm -rf "$APP/panel"
-cp "$SRC/modem-server.py" "$SRC/megalink_switch.py" "$SRC/mkupdate.py" "$SRC/LICENSE" "$SRC/README.md" "$APP/"
+cp "$SRC/VERSION" "$SRC/modem-server.py" "$SRC/megalink_switch.py" "$SRC/mkupdate.py" "$SRC/LICENSE" "$SRC/README.md" "$APP/"
 cp -r "$SRC/panel" "$SRC/docs" "$SRC/deploy" "$APP/"
 find "$APP" -name __pycache__ -prune -exec rm -rf {} +
 rm -f "$APP/panel/panel.json"
@@ -91,6 +106,11 @@ fi
 say "services"
 install -m 644 "$APP/deploy/tournamaxx.service" /etc/systemd/system/tournamaxx.service
 install -m 644 "$APP/deploy/tournamaxx-panel.service" /etc/systemd/system/tournamaxx-panel.service
+install -m 644 "$APP/deploy/tournamaxx-update.service" /etc/systemd/system/tournamaxx-update.service
+install -m 644 "$APP/deploy/tournamaxx-update.path" /etc/systemd/system/tournamaxx-update.path
+# The panel leaves its update requests here; deploy/update.py (root) answers.
+install -d -o tournamaxx -g tournamaxx -m 755 "$DATA/update"
+echo '{"kind": "systemd"}' > "$DATA/update/updater.json"
 SYSTEMCTL=$(command -v systemctl)
 cat > /tmp/tournamaxx.sudoers <<EOF
 # The control panel (user tournamaxx) may start, stop and restart the server.
@@ -103,7 +123,9 @@ install -m 644 "$APP/deploy/logrotate-tournamaxx" /etc/logrotate.d/tournamaxx
 systemctl daemon-reload
 
 say "panel login"
-if ! grep -q '"pbkdf2_sha256' "$DATA/panel.json"; then
+if [ "$UPDATE" = 1 ]; then
+    echo "kept"
+elif ! grep -q '"pbkdf2_sha256' "$DATA/panel.json"; then
     echo "Choose the panel's admin password (10 characters or more)."
     if [ -n "${TMX_PASSWORD:-}" ]; then
         runuser -u tournamaxx -- env TMX_PASSWORD="$TMX_PASSWORD" python3 "$APP/panel/panel.py" --config "$DATA/panel.json" --set-password admin
@@ -114,8 +136,8 @@ else
     echo "kept (change it in the panel, under Settings)"
 fi
 
-systemctl enable -q tournamaxx tournamaxx-panel
-systemctl restart tournamaxx tournamaxx-panel
+systemctl enable -q tournamaxx tournamaxx-panel tournamaxx-update.path
+systemctl restart tournamaxx tournamaxx-panel tournamaxx-update.path
 
 say "nginx for $DOMAIN"
 sed "s/__DOMAIN__/$DOMAIN/g" "$APP/deploy/nginx-tournamaxx.conf" > /etc/nginx/sites-available/tournamaxx

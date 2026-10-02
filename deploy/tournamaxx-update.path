@@ -1,0 +1,9 @@
+[Unit]
+Description=TournaMAXX-Revival: watch for an update the control panel asks for
+
+[Path]
+PathExists=/var/lib/tournamaxx/update/request.json
+Unit=tournamaxx-update.service
+
+[Install]
+WantedBy=multi-user.target

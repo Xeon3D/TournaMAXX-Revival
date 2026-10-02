@@ -116,7 +116,28 @@ To build it yourself: `docker build -t tournamaxx-revival .`
 
 Each GitHub release publishes the image
 (`.github/workflows/docker.yml`): a release tagged `v1.2.3` is pushed as
-`1.2.3`, `1.2` and `latest`.
+`1.2.3`, `1.2` and `latest`. The tag must match the `VERSION` file (the
+workflow checks), so bump `VERSION` and commit it before tagging.
+
+## Updates
+
+The panel shows its version (from `VERSION`) and, every 6 hours, looks up
+the latest GitHub release (**Settings > Updates**; it can be switched off
+there). When a newer one is out, the Dashboard says so, and Settings shows
+its notes and an **Update** button where an updater is installed. The panel
+never updates itself: it leaves a request in `<data>/update/`, and
+
+- in Docker, the `updater` service of
+  [deploy/docker-compose.yml](deploy/docker-compose.yml) (`docker/updater.py`,
+  from the same image, with the Docker socket) pulls the new image and
+  recreates the container with the same settings; if the new one does not
+  come up healthy, the old one comes back;
+- on a `deploy/install.sh` server, `tournamaxx-update.path` runs
+  `deploy/update.py` as root, which downloads the release and runs its
+  `install.sh --update`.
+
+Elsewhere (a checkout, as when trying it out) update by hand: `git pull`,
+then restart the panel.
 
 ## On a server: `deploy/`
 
@@ -128,7 +149,8 @@ stop the server (and nothing else); the Mega-Link switch runs on UDP 8086:
 
     sudo sh deploy/install.sh --domain us.accessmerit.com --email you@example.com
 
-It asks for the panel's admin password. Run it again to update; the data in
+It asks for the panel's admin password. Run it again to update (or press
+Update in the panel, see [Updates](#updates)); the data in
 `/var/lib/tournamaxx` stays. The machine needs TCP 80 and 443 (the panel),
 2323 (the emulators' modem calls), UDP 8086 (Mega-Link) and, for direct
 connections, 15000 and 17751.

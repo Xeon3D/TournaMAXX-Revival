@@ -7,6 +7,11 @@
 #   sudo mkdir -p /DATA/AppData/tournamaxx && sudo chown 1000:1000 /DATA/AppData/tournamaxx
 #
 # Then open http://<host>:8480/ within 15 minutes to make the first user.
+#
+# The second service, "updater", applies updates when you press Update in the
+# panel (Settings > Updates): it pulls the new image and recreates the
+# tournamaxx container.  It needs the Docker socket, so it runs apart from the
+# panel; leave it out to update by hand (pull and recreate) instead.
 
 name: tournamaxx
 services:
@@ -26,3 +31,17 @@ services:
       TMX_SWITCH_PORT: "8086"
       # TMX_TRUSTED_PROXIES: "172.16.0.0/12"  # where Nginx Proxy Manager connects from (docs/zimaos.md)
       # TMX_ADMIN_PASSWORD: "..."  # instead of making the first user in the browser
+
+  updater:
+    image: xeon3d/tournamaxx-revival:latest
+    container_name: tournamaxx-updater
+    restart: unless-stopped
+    entrypoint: ["python3", "/app/docker/updater.py"]
+    user: "0:0"              # for the Docker socket
+    volumes:
+      - /DATA/AppData/tournamaxx:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TMX_UPDATE_CONTAINER: tournamaxx
+    healthcheck:
+      disable: true          # the image's check is the panel's, which this does not run

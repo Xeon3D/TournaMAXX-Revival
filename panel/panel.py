@@ -22,6 +22,7 @@ The config (made with defaults if missing):
               | {"mode": "systemd", "unit": "tournamaxx"},
      "server": {"port": 2323, "tcp_ports": [], "admin_port": 2324,
                 "switch_port": 0},         the Mega-Link switch's UDP port (0: off)
+     "update_check": true,                 look up the latest GitHub release every 6 hours
      "secure_cookies": false,              true: always Secure (also when a proxy
                                            sends X-Forwarded-Proto: https)
      "trusted_proxies": [],                more proxies whose X-Real-IP is believed,
@@ -68,6 +69,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1143,7 +1145,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return {"service": svc, "server": CFG["server"], "counts": counts, "cabinets": cabs,
                 "calls": recent_calls(), "log_size": size, "error": err, "now": now(),
                 "host": socket.gethostname(), "interfaces": interfaces(),
-                "panel": {"port": int(CFG["port"]), "listening": listening()}}
+                "panel": {"port": int(CFG["port"]), "listening": listening()},
+                "version": app_version(), "update": update_summary()}
 
     def post_service(self, qs):
         action = self.json_body().get("action")
@@ -1270,6 +1273,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
             save_config()
         return {"panel": self.panel_access(), "cut": not covers(addrs, here)}
 
+    # -------------------------------------------------------------- updates
+    def get_update(self, qs):
+        with LATEST_LOCK:
+            latest = dict(LATEST)
+        st = read_json(data("update", "status.json"))
+        return {"version": app_version(), "release": latest["release"], "newer": update_summary()["newer"],
+                "checked": latest["checked"], "error": latest["error"], "check": bool(CFG.get("update_check", True)),
+                "updater": updater_info(), "status": st, "busy": update_busy(st),
+                "mode": CFG["service"].get("mode"), "docker": os.path.exists("/.dockerenv"), "now": now()}
+
+    def post_update_check(self, qs):
+        check_release()
+        return self.get_update(qs)
+
+    def post_update_settings(self, qs):
+        with CFG_LOCK:
+            CFG["update_check"] = bool(self.json_body().get("check"))
+            save_config()
+        if CFG["update_check"]:
+            check_release()
+        return self.get_update(qs)
+
+    def post_update_apply(self, qs):
+        """Leave a request for the updater (the Docker sidecar, or deploy/'s
+        systemd path unit): the panel itself changes nothing."""
+        want = str(self.json_body().get("version") or "")
+        info = self.get_update(qs)
+        if not (info["updater"] or {}).get("ok"):
+            raise ValueError("there is no updater here: update by hand (see Settings > Updates)")
+        rel = info["release"]
+        if not rel or want != rel["version"] or not info["newer"]:
+            raise ValueError("%s is not a newer release" % (want or "that"))
+        if info["busy"]:
+            raise ValueError("an update is already under way")
+        os.makedirs(data("update"), exist_ok=True)
+        write_atomic(data("update", "request.json"),
+                     json.dumps({"version": want, "by": self.user, "at": now()}).encode("utf-8"))
+        print("update to %s asked for by %s" % (want, self.user), flush=True)
+        return self.get_update(qs)
+
     def post_settings(self, qs):
         body = self.json_body()
         req = body.get("server", {})
@@ -1355,6 +1398,98 @@ class Handler(http.server.BaseHTTPRequestHandler):
             save_config()
         end_sessions(name)
         return self.get_users(qs)
+
+
+# ------------------------------------------------------------------ updates
+#
+# The panel knows its version (VERSION, beside panel/) and looks up the latest
+# GitHub release now and then.  It never updates itself: "Update" leaves
+# <data_dir>/update/request.json for an updater, which writes status.json as
+# it goes and announces itself in updater.json:
+#   Docker   docker/updater.py, a sidecar container with the Docker socket
+#            (deploy/docker-compose.yml); it beats every few seconds
+#   systemd  deploy/update.py, run as root by tournamaxx-update.path when the
+#            request appears (deploy/install.sh sets it up)
+
+UPDATE_REPO = "Xeon3D/TournaMAXX-Revival"
+UPDATE_EVERY = 6 * 3600
+UPDATE_BUSY = ("queued", "pulling", "downloading", "installing", "restarting", "starting")
+VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+LATEST = {"checked": 0, "release": None, "error": None}
+LATEST_LOCK = threading.Lock()
+
+
+def app_version():
+    try:
+        with open(os.path.join(HERE, "..", "VERSION"), encoding="utf-8") as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def version_key(v):
+    m = VERSION_RE.match(str(v or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def check_release():
+    """The latest release (GitHub's "latest" is never a pre-release) into LATEST."""
+    req = urllib.request.Request("https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO, headers={
+        "Accept": "application/vnd.github+json", "User-Agent": "TournaMAXX-panel/%s" % app_version()})
+    rel = err = None
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            j = json.load(r)
+        if version_key(j["tag_name"]) is None:
+            raise ValueError("the latest release's tag is not a version: %s" % j["tag_name"])
+        rel = {"version": j["tag_name"].lstrip("v"), "tag": j["tag_name"], "name": j.get("name") or j["tag_name"],
+               "notes": (j.get("body") or "")[:20000], "url": j.get("html_url"), "published": j.get("published_at")}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        err = "could not check GitHub: %s" % e
+    with LATEST_LOCK:
+        LATEST.update(checked=now(), error=err)
+        if rel:
+            LATEST["release"] = rel
+
+
+def update_checker():
+    while True:
+        if CFG.get("update_check", True):
+            check_release()
+        time.sleep(UPDATE_EVERY)
+
+
+def update_summary():
+    with LATEST_LOCK:
+        rel = LATEST["release"]
+    cur, new = version_key(app_version()), version_key(rel and rel["version"])
+    return {"newer": bool(cur and new and new > cur), "version": rel and rel["version"]}
+
+
+def updater_info():
+    """The updater that announced itself, with "ok": whether it can take a
+    request now (a Docker sidecar that stopped beating cannot)."""
+    u = read_json(data("update", "updater.json"))
+    if not isinstance(u, dict) or u.get("kind") not in ("docker", "systemd"):
+        return None
+    u["ok"] = u["kind"] == "systemd" or now() - int(u.get("at") or 0) < 60
+    return u
+
+
+def update_busy(st):
+    """A request not yet taken, or an update under way (one that went quiet
+    for 15 minutes has died)."""
+    if os.path.exists(data("update", "request.json")):
+        return True
+    return bool(st) and st.get("state") in UPDATE_BUSY and now() - int(st.get("at") or 0) < 900
 
 
 # ------------------------------------------------------------------ network interfaces
@@ -1628,6 +1763,8 @@ def main():
             SERVICE.start()
         except (OSError, RuntimeError) as e:
             print("could not start the server: %s" % e)
+    print("version %s" % app_version(), flush=True)
+    threading.Thread(target=update_checker, daemon=True).start()
 
     def stop(signum, frame):
         raise KeyboardInterrupt      # docker stop / systemctl stop: stop the server too

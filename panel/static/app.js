@@ -391,7 +391,9 @@ PAGES.dashboard = async (main) => {
     el("td", {}, k.completed ? pill("complete", "ok") : k.end ? pill("broke off", "warn") : pill("on line", "warn"))));
 
   fill(main, 
-    header("Dashboard", `${o.host} · log ${bytes(o.log_size)}`),
+    header("Dashboard", `${o.host} · v${o.version} · log ${bytes(o.log_size)}`),
+    o.update?.newer ? el("div", { class: "note" }, `TournaMAXX-Revival ${o.update.version} is out (this is ${o.version}): see `,
+      el("a", { href: "#settings" }, "Settings > Updates"), ".") : null,
     o.error ? el("div", { class: "note warn" }, o.error) : null,
     el("div", { class: "grid cols-2" },
       el("div", { class: "card stack" },
@@ -1193,8 +1195,89 @@ PAGES.settings = async (main) => {
 
   fill(main, header("Settings", `Data in ${s.data_dir}`),
     el("div", { class: "grid cols-2" }, srv, pw),
-    el("div", { class: "grid cols-2" }, panelAccessCard(s.panel), await usersCard()), bk, raw);
+    el("div", { class: "grid cols-2" }, panelAccessCard(s.panel), await usersCard()), await updatesCard(), bk, raw);
 };
+
+// The panel's version, the latest release, and Update when an updater is here
+// (docker/updater.py beside the container, or deploy/'s systemd units).
+async function updatesCard() {
+  const card = el("div", { class: "card stack" });
+  const STATE_WORDS = { queued: "waiting for the updater", pulling: "downloading the image", downloading: "downloading",
+    installing: "installing", restarting: "restarting", starting: "starting the new version", done: "done", failed: "failed" };
+
+  // While an update runs: the panel stops answering, then comes back as the
+  // new version with no sessions (401), or with the old one rolled back.
+  const follow = (target) => {
+    clearInterval(timer);
+    let gone = false;
+    timer = setInterval(async () => {
+      let r;
+      try { r = await fetch("/api/update"); } catch { gone = true; return draw(null, `Restarting… (${target})`); }
+      if (r.status === 401) {
+        clearInterval(timer);
+        toast("The panel restarted: log in again");
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+      if (!r.ok) { gone = true; return draw(null, `Restarting… (${target})`); }
+      const u = await r.json();
+      if (!u.busy || gone) { clearInterval(timer); draw(u); if (u.version === target) toast(`Updated to ${target}`); return; }
+      draw(u);
+    }, 3000);
+  };
+
+  const draw = (u, restarting) => {
+    if (!u) {
+      fill(card, el("h2", {}, "Updates"), el("div", { class: "note" }, restarting));
+      return;
+    }
+    const rel = u.release;
+    const st = u.status;
+    const waiting = u.busy && (!st || st.state === "done" || st.state === "failed");   // the request is not taken yet
+    const check = el("input", { type: "checkbox", checked: u.check });
+    check.onchange = async () => draw(await guard(() => api("/api/update/settings", { body: { check: check.checked } })));
+    const howTo = u.updater?.kind === "docker" && !u.updater.ok
+      ? "The updater container (tournamaxx-updater) is not running: start it, or update by hand."
+      : u.docker ? "Update the app in ZimaOS (or docker compose pull && docker compose up -d). For an Update button here, add the updater service from deploy/docker-compose.yml."
+      : u.mode === "systemd" ? "Run deploy/install.sh from the new release (sudo sh deploy/install.sh --update)."
+      : "git pull, then restart the panel.";
+    const apply = el("button", {
+      class: "primary", onclick: async () => {
+        if (!(await confirmBox(`Update to ${rel.version}?`, "The server and the panel restart: a cabinet on a call is cut off (it sends the call again next time), "
+          + "and you log in again." + (u.updater.kind === "docker" ? " If the new version does not come up, the updater puts this one back." : ""),
+          "Update"))) return;
+        draw(await guard(() => api("/api/update/apply", { body: { version: rel.version } })));
+        follow(rel.version);
+      },
+    }, `Update to ${rel?.version}`);
+
+    fill(card,
+      el("div", { class: "row spread" }, el("h2", {}, "Updates"),
+        el("button", { onclick: async () => draw(await guard(() => api("/api/update/check", { body: {} }))) }, "Check now")),
+      el("dl", { class: "kv" },
+        el("dt", {}, "This version"), el("dd", {}, el("code", {}, u.version)),
+        el("dt", {}, "Latest release"), el("dd", {}, rel ? [el("a", { href: rel.url, target: "_blank", rel: "noopener" }, rel.name),
+          rel.published ? el("small", {}, ` — ${rel.published.slice(0, 10)}`) : null] : el("span", { class: "muted" }, "—")),
+        el("dt", {}, "Checked"), el("dd", {}, u.checked ? ago(u.checked) : "not yet"),
+        el("dt", {}, "Updater"), el("dd", {}, u.updater ? `${u.updater.kind}${u.updater.ok ? "" : " (not running)"}` : el("span", { class: "muted" }, "none: by hand"))),
+      u.error ? el("div", { class: "note warn" }, u.error) : null,
+      waiting ? el("div", { class: "note" }, "Update asked for: waiting for the updater to take it…") : null,
+      !waiting && st && (u.busy || st.at > u.now - 86400) ? el("div", { class: `note${st.state === "failed" ? " warn" : ""}` },
+        `${st.version ? `Update to ${st.version}: ` : ""}${STATE_WORDS[st.state] || st.state}`, st.message ? ` — ${st.message}` : "",
+        el("small", {}, ` (${ago(st.at)})`)) : null,
+      u.newer && !u.busy ? [
+        el("p", {}, el("b", {}, `${rel.name} is out.`)),
+        rel.notes ? el("pre", { class: "log notes" }, rel.notes) : null,
+        u.updater?.ok ? el("div", { class: "row" }, apply) : el("div", { class: "note" }, howTo),
+      ] : !u.busy && rel && !u.newer ? el("p", { class: "muted" }, "This is the latest release.") : null,
+      el("label", { class: "check" }, check, "Look for new releases on GitHub every 6 hours"));
+  };
+
+  const u = await api("/api/update");
+  draw(u);
+  if (u.busy) follow(u.status?.version);
+  return card;
+}
 
 // Where the control panel listens: 127.0.0.1, every address, or chosen ones.
 function panelAccessCard(p) {

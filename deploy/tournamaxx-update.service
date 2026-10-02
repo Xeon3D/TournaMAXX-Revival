@@ -1,0 +1,11 @@
+[Unit]
+Description=TournaMAXX-Revival: install the release the control panel asked for
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# As root: it reinstalls /opt/tournamaxx and the units (deploy/update.py).
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/tournamaxx/deploy/update.py
+TimeoutStartSec=30min
+PrivateTmp=yes
