@@ -286,7 +286,7 @@ async function refreshPill() {
     const o = await api("/api/overview");
     const s = o.service;
     const p = $("#svc-pill");
-    p.textContent = s.active ? "Server running" : "Server stopped";
+    p.textContent = s.active ? "Server running" : s.failure ? "Server failed" : "Server stopped";
     p.className = "pill " + (s.active ? "ok" : "bad");
     $("#host").textContent = o.host;
     return o;
@@ -396,7 +396,9 @@ PAGES.dashboard = async (main) => {
     el("div", { class: "grid cols-2" },
       el("div", { class: "card stack" },
         el("div", { class: "row spread" }, el("h2", {}, "Server"),
-          pill(s.active ? "running" : "stopped", s.active ? "ok" : "bad")),
+          pill(s.active ? "running" : s.failure ? "failed" : "stopped", s.active ? "ok" : "bad")),
+        s.failure ? el("div", { class: "note warn" }, s.failure[0].toUpperCase(), s.failure.slice(1),
+          ". The panel stopped starting it again: fix that, then Start it.") : null,
         el("dl", { class: "kv" },
           el("dt", {}, "State"), el("dd", {}, s.state),
           el("dt", {}, "Up for"), el("dd", {}, s.since ? dur(o.now - s.since) : "—"),

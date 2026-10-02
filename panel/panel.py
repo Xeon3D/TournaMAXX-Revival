@@ -321,40 +321,63 @@ def server_args():
     return args
 
 
+CRASH_SECONDS = 60       # a server that stops sooner than this after starting has crashed
+MAX_CRASHES = 3          # crashes in a row before the panel stops starting it again
+
+
+def last_error():
+    """The last line of server-stderr.txt (a traceback's "OSError: ..."), without colours."""
+    lines, _ = tail(data("server-stderr.txt"), 8192)
+    lines = [re.sub(r"\x1b\[[0-9;]*m", "", l).strip() for l in lines]
+    lines = [l for l in lines if l]
+    return lines[-1] if lines else ""
+
+
 class ProcessService:
     """The panel runs the server as its own child (trying it out, and in the
     Docker image).  A server that stops without being told to is started
-    again, as systemd would."""
+    again, as systemd would -- but not after MAX_CRASHES quick crashes in a
+    row (a port another program holds, say): then it waits for a start by
+    hand."""
 
     def __init__(self):
         self.proc = None
         self.started = None
         self.wanted = False
+        self.crashes = 0
+        self.failure = None
         self.lock = threading.RLock()
         threading.Thread(target=self.watch, daemon=True).start()
 
     def status(self):
         running = self.proc is not None and self.proc.poll() is None
-        return {"mode": "process", "active": running, "state": "running" if running else "stopped",
+        state = "running" if running else "failed" if self.failure else "stopped"
+        return {"mode": "process", "active": running, "state": state, "failure": self.failure,
                 "pid": self.proc.pid if running else None, "since": self.started if running else None}
 
     def start(self):
+        """A start by hand (or the panel's own at its start): the crashes count again from 0."""
         with self.lock:
-            self.wanted = True
-            if self.status()["active"]:
-                return
-            cmd = [sys.executable, CFG["server_script"], "--log", log_path(), "--state", state_path()] + server_args()
-            with open(data("server-stderr.txt"), "ab") as err:
-                self.proc = subprocess.Popen(cmd, cwd=CFG["data_dir"], stdin=subprocess.DEVNULL,
-                                             stdout=subprocess.DEVNULL, stderr=err)
-            self.started = now()
-            time.sleep(0.5)
-            if self.proc.poll() is not None:
-                raise RuntimeError("the server stopped at once; see server-stderr.txt")
+            self.crashes, self.failure = 0, None
+            self._start()
+
+    def _start(self):
+        self.wanted = True
+        if self.status()["active"]:
+            return
+        cmd = [sys.executable, CFG["server_script"], "--log", log_path(), "--state", state_path()] + server_args()
+        with open(data("server-stderr.txt"), "ab") as err:
+            self.proc = subprocess.Popen(cmd, cwd=CFG["data_dir"], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=err)
+        self.started = now()
+        time.sleep(0.5)
+        if self.proc.poll() is not None:
+            raise RuntimeError("the server stopped at once: %s" % (last_error() or "see server-stderr.txt"))
 
     def stop(self):
         with self.lock:
             self.wanted = False
+            self.failure = None
             if self.status()["active"]:
                 self.proc.terminate()
                 try:
@@ -367,13 +390,22 @@ class ProcessService:
         while True:
             time.sleep(5)
             with self.lock:
-                if self.wanted and self.proc is not None and self.proc.poll() is not None:
-                    print("the server stopped (exit %s): starting it again" % self.proc.returncode, flush=True)
-                    self.proc = None
-                    try:
-                        self.start()
-                    except (OSError, RuntimeError) as e:
-                        print("could not start the server: %s" % e, flush=True)
+                if not (self.wanted and self.proc is not None and self.proc.poll() is not None):
+                    continue
+                code = self.proc.returncode
+                self.proc = None
+                self.crashes = self.crashes + 1 if now() - self.started < CRASH_SECONDS else 1
+                if self.crashes >= MAX_CRASHES:
+                    self.wanted = False
+                    self.failure = "the server stopped %d times in a row within %d seconds of starting (exit %s): %s" % (
+                        self.crashes, CRASH_SECONDS, code, last_error() or "see server-stderr.txt")
+                    print("%s; not starting it again until it is started by hand" % self.failure, flush=True)
+                    continue
+                print("the server stopped (exit %s): starting it again" % code, flush=True)
+                try:
+                    self._start()
+                except (OSError, RuntimeError) as e:
+                    print("could not start the server: %s" % e, flush=True)
 
     def restart(self):
         self.stop()
