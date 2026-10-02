@@ -14,7 +14,8 @@ the file itself while it is stopped.
 
 The config (made with defaults if missing):
 
-    {"listen": "127.0.0.1", "port": 8080,
+    {"listen": "127.0.0.1", "port": 8080,  one address, or a list; "0.0.0.0": all IPv4,
+                                           "::": all IPv6 (Settings > Panel access sets it)
      "data_dir": ".",                      state, log, files, packages, backups
      "server_script": "../modem-server.py",
      "service": {"mode": "process"}        the panel runs the server itself
@@ -59,6 +60,7 @@ import secrets
 import shutil
 import signal
 import socket
+import socketserver
 import struct
 import subprocess
 import sys
@@ -1108,7 +1110,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _, size = tail(log_path(), 0)
         return {"service": svc, "server": CFG["server"], "counts": counts, "cabinets": cabs,
                 "calls": recent_calls(), "log_size": size, "error": err, "now": now(),
-                "host": socket.gethostname()}
+                "host": socket.gethostname(), "interfaces": interfaces(),
+                "panel": {"port": int(CFG["port"]), "listening": listening()}}
 
     def post_service(self, qs):
         action = self.json_body().get("action")
@@ -1213,7 +1216,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -------------------------------------------------------------- settings
     def get_settings(self, qs):
         return {"server": CFG["server"], "service": CFG["service"], "users": sorted(CFG["users"]),
-                "data_dir": CFG["data_dir"], "backups": backups()}
+                "data_dir": CFG["data_dir"], "backups": backups(), "panel": self.panel_access()}
+
+    def panel_access(self):
+        return {"listen": listen_config(), "listening": listening(), "port": int(CFG["port"]),
+                "interfaces": interfaces(), "via": self.connection.getsockname()[0],
+                "docker": os.path.exists("/.dockerenv")}
+
+    def post_panel_listen(self, qs):
+        """Where the panel listens; applied at once.  Leaving out the address
+        this request came in on needs "force"."""
+        body = self.json_body()
+        addrs = clean_addresses(body.get("listen") or [])
+        here = self.connection.getsockname()[0]
+        if not covers(addrs, here) and not body.get("force"):
+            return {"confirm": "You are connected through %s, which this leaves out: this page stops "
+                               "answering there, and you open the panel again on one of the new addresses." % here}
+        set_listeners(addrs)
+        with CFG_LOCK:
+            CFG["listen"] = addrs[0] if len(addrs) == 1 else addrs
+            save_config()
+        return {"panel": self.panel_access(), "cut": not covers(addrs, here)}
 
     def post_settings(self, qs):
         body = self.json_body()
@@ -1302,6 +1325,240 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.get_users(qs)
 
 
+# ------------------------------------------------------------------ network interfaces
+
+def _windows_interfaces():
+    """GetAdaptersAddresses: every adapter that is up, by its friendly name."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SOCKET_ADDRESS(ctypes.Structure):
+        _fields_ = [("sockaddr", ctypes.c_void_p), ("length", ctypes.c_int)]
+
+    class UNICAST(ctypes.Structure):          # IP_ADAPTER_UNICAST_ADDRESS, as far as needed
+        pass
+    UNICAST._fields_ = [("length", ctypes.c_ulong), ("flags", wintypes.DWORD),
+                        ("next", ctypes.POINTER(UNICAST)), ("address", SOCKET_ADDRESS)]
+
+    class ADAPTER(ctypes.Structure):          # IP_ADAPTER_ADDRESSES, as far as OperStatus
+        pass
+    ADAPTER._fields_ = [("length", ctypes.c_ulong), ("index", wintypes.DWORD),
+                        ("next", ctypes.POINTER(ADAPTER)), ("name", ctypes.c_char_p),
+                        ("unicast", ctypes.POINTER(UNICAST)), ("anycast", ctypes.c_void_p),
+                        ("multicast", ctypes.c_void_p), ("dns", ctypes.c_void_p),
+                        ("suffix", ctypes.c_wchar_p), ("description", ctypes.c_wchar_p),
+                        ("friendly", ctypes.c_wchar_p), ("mac", ctypes.c_ubyte * 8),
+                        ("mac_length", ctypes.c_ulong), ("flags", ctypes.c_ulong), ("mtu", ctypes.c_ulong),
+                        ("type", ctypes.c_ulong), ("oper", ctypes.c_int)]
+
+    gaa = ctypes.windll.iphlpapi.GetAdaptersAddresses
+    gaa.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    gaa.restype = ctypes.c_ulong
+    size = ctypes.c_ulong(16384)
+    for _ in range(4):
+        buf = ctypes.create_string_buffer(size.value)
+        # AF_UNSPEC; skip anycast, multicast and DNS servers
+        r = gaa(0, 0x0E, None, buf, ctypes.byref(size))
+        if r != 111:                          # ERROR_BUFFER_OVERFLOW: size now says how much
+            break
+    if r:
+        raise OSError("GetAdaptersAddresses: error %d" % r)
+    out = []
+    p = ctypes.cast(buf, ctypes.POINTER(ADAPTER))
+    while p:
+        a = p.contents
+        addrs = []
+        u = a.unicast
+        while u:
+            raw = ctypes.string_at(u.contents.address.sockaddr, u.contents.address.length)
+            fam = int.from_bytes(raw[:2], "little")
+            if fam == 2:
+                addrs.append(socket.inet_ntop(socket.AF_INET, raw[4:8]))
+            elif fam == 23:
+                addrs.append(socket.inet_ntop(socket.AF_INET6, raw[8:24]))
+            u = u.contents.next
+        if a.oper == 1:                       # IfOperStatusUp
+            out.append((a.friendly or a.description or "", addrs))
+        p = a.next
+    return out
+
+
+def _linux_interfaces():
+    """Each interface's (primary) IPv4 address, and its IPv6 ones."""
+    import fcntl
+    found = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for _, name in socket.if_nameindex():
+            found[name] = []
+            try:
+                r = fcntl.ioctl(s.fileno(), 0x8915, struct.pack("256s", name.encode()[:15]))   # SIOCGIFADDR
+                found[name].append(socket.inet_ntoa(r[20:24]))
+            except OSError:
+                pass
+    try:
+        with open("/proc/net/if_inet6") as f:
+            for line in f:
+                hexaddr, *_, name = line.split()
+                found.setdefault(name, []).append(socket.inet_ntop(socket.AF_INET6, bytes.fromhex(hexaddr)))
+    except OSError:
+        pass
+    return list(found.items())
+
+
+def interfaces():
+    """[{"name", "addresses"}], loopback first; unnamed where the system does not say."""
+    try:
+        if sys.platform == "win32":
+            found = _windows_interfaces()
+        elif sys.platform.startswith("linux"):
+            found = _linux_interfaces()
+        else:
+            raise OSError("no interface list here")
+    except (OSError, AttributeError, ImportError):
+        addrs = {"127.0.0.1"}
+        try:
+            addrs.update(i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+        except OSError:
+            pass
+        found = [("", sorted(addrs))]
+    out = []
+    for name, addrs in found:
+        addrs = sorted(dict.fromkeys(addrs), key=lambda a: (":" in a, socket.inet_pton(
+            socket.AF_INET6 if ":" in a else socket.AF_INET, a)))
+        if addrs:
+            out.append({"name": name, "addresses": addrs,
+                        "loopback": all(a.startswith("127.") or a == "::1" for a in addrs)})
+    out.sort(key=lambda i: not i["loopback"])
+    return out
+
+
+# ------------------------------------------------------------------ where the panel listens
+
+ALL_V4, ALL_V6 = "0.0.0.0", "::"
+LISTEN_LOCK = threading.Lock()
+LISTENERS = {}            # address -> PanelServer, each serving in its own thread
+
+
+class PanelServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    # On Windows SO_REUSEADDR would let the panel share a port another program holds.
+    allow_reuse_address = os.name != "nt"
+
+    def __init__(self, host, port):
+        self.address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        super().__init__((host, port), Handler)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6:
+            # "::" beside "0.0.0.0" on one port: IPv6 only, or the two collide
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        socketserver.TCPServer.server_bind(self)     # HTTPServer's also looks the host's name up
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+def clean_addresses(addrs):
+    """Checked, written the standard way, without repeats; a family's wildcard
+    replaces that family's other addresses (they cannot share its port)."""
+    out = []
+    for a in addrs:
+        a = str(a).strip().strip("[]")
+        if not a:
+            continue
+        fam = socket.AF_INET6 if ":" in a else socket.AF_INET
+        try:
+            a = socket.inet_ntop(fam, socket.inet_pton(fam, a))
+        except OSError:
+            raise ValueError("not an IP address: %s" % a)
+        if a not in out:
+            out.append(a)
+    if ALL_V4 in out:
+        out = [a for a in out if ":" in a or a == ALL_V4]
+    if ALL_V6 in out:
+        out = [a for a in out if ":" not in a or a == ALL_V6]
+    if not out:
+        raise ValueError("choose at least one address")
+    return out
+
+
+def listen_config():
+    """The config's "listen": one address, or a list of them."""
+    v = CFG.get("listen") or "127.0.0.1"
+    return clean_addresses(v if isinstance(v, list) else str(v).split(","))
+
+
+def covers(addrs, addr):
+    """Whether listening on addrs takes connections to addr."""
+    return addr in addrs or (ALL_V6 if ":" in addr else ALL_V4) in addrs
+
+
+def listening():
+    with LISTEN_LOCK:
+        return sorted(LISTENERS, key=lambda a: (":" in a, a))
+
+
+def serve(host, port):
+    srv = PanelServer(host, port)
+    threading.Thread(target=srv.serve_forever, daemon=True, name="panel %s" % host).start()
+    return srv
+
+
+def close(srv):
+    srv.shutdown()
+    srv.server_close()
+
+
+def set_listeners(addrs):
+    """Listen on exactly these addresses.  The ones to go are closed first (an
+    address and its wildcard cannot both hold the port); if a new one cannot
+    be opened, what was there is put back and the error raised."""
+    port = int(CFG["port"])
+    with LISTEN_LOCK:
+        gone = [a for a in LISTENERS if a not in addrs]
+        for a in gone:
+            close(LISTENERS.pop(a))
+        added = []
+        try:
+            for a in addrs:
+                if a not in LISTENERS:
+                    LISTENERS[a] = serve(a, port)
+                    added.append(a)
+        except OSError as e:
+            bad = a
+            for a in added:
+                close(LISTENERS.pop(a))
+            for a in gone:
+                try:
+                    LISTENERS[a] = serve(a, port)
+                except OSError as e2:
+                    print("could not listen on %s port %d again: %s" % (a, port, e2), flush=True)
+            raise ValueError("cannot listen on %s port %d: %s" % (bad, port, e.strerror or e))
+
+
+def start_listening():
+    """The configured addresses; one that is gone (a changed DHCP lease, an
+    unplugged adapter) is skipped, and with none left, 127.0.0.1."""
+    port = int(CFG["port"])
+    addrs = listen_config()
+    for a in addrs:
+        try:
+            LISTENERS[a] = serve(a, port)
+        except OSError as e:
+            print("cannot listen on %s port %d: %s" % (a, port, e.strerror or e), flush=True)
+    if not LISTENERS and addrs != ["127.0.0.1"]:
+        print("listening on 127.0.0.1 instead: choose the addresses again under Settings", flush=True)
+        try:
+            LISTENERS["127.0.0.1"] = serve("127.0.0.1", port)
+        except OSError:
+            pass
+    if not LISTENERS:
+        sys.exit("the control panel cannot listen on port %d" % port)
+    for a in listening():
+        host = "[%s]" % a if ":" in a else a
+        where = {ALL_V4: " (every IPv4 address)", ALL_V6: " (every IPv6 address)"}.get(a, "")
+        print("control panel on http://%s:%d/%s" % (host, port, where), flush=True)
+
+
 def main():
     global SERVICE
     ap = argparse.ArgumentParser(description="TournaMAXX-Revival control panel")
@@ -1330,20 +1587,22 @@ def main():
               "(or run with --set-password NAME)" % SETUP_MINUTES, flush=True)
     svc = CFG["service"]
     SERVICE = SystemdService(svc.get("unit", "tournamaxx")) if svc.get("mode") == "systemd" else ProcessService()
+    try:
+        start_listening()
+    except ValueError as e:          # a bad "listen" in the config
+        sys.exit("listen: %s" % e)
     if svc.get("mode") != "systemd" and svc.get("autostart", True):
         try:
             SERVICE.start()
         except (OSError, RuntimeError) as e:
             print("could not start the server: %s" % e)
-    httpd = http.server.ThreadingHTTPServer((CFG["listen"], int(CFG["port"])), Handler)
-    httpd.daemon_threads = True
 
     def stop(signum, frame):
         raise KeyboardInterrupt      # docker stop / systemctl stop: stop the server too
     signal.signal(signal.SIGTERM, stop)
-    print("control panel on http://%s:%d/" % (CFG["listen"], CFG["port"]), flush=True)
     try:
-        httpd.serve_forever()
+        while True:
+            time.sleep(1)            # the listeners serve in their threads
     except KeyboardInterrupt:
         pass
     finally:

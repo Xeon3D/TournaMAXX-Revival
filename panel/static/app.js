@@ -330,6 +330,28 @@ function header(title, sub, ...actions) {
 
 // ------------------------------------------------------------------ dashboard
 
+// Where the panel listens.
+const WILD = { "0.0.0.0": "every IPv4 address", "::": "every IPv6 address" };
+const hostPort = (a, port) => `${a.includes(":") ? `[${a}]` : a}:${port}`;
+const covers = (listen, a) => listen.includes(a) || listen.includes(a.includes(":") ? "::" : "0.0.0.0");
+const isLoopback = (a) => a.startsWith("127.") || a === "::1";
+const isLinkLocal = (a) => /^fe80:/i.test(a);
+
+function interfacesCard(o) {
+  const rows = o.interfaces.map((i) => el("tr", {},
+    el("td", {}, i.name || el("span", { class: "muted" }, "—")),
+    el("td", {}, i.addresses.map((a) => el("div", {},
+      el("code", {}, a),
+      isLinkLocal(a) ? el("small", {}, " link-local") : null,
+      covers(o.panel.listening, a) ? [" ", pill("panel", "ok")] : null)))));
+  return el("div", { class: "card stack" },
+    el("h2", {}, "Network interfaces"),
+    table(["Interface", "Addresses"], rows, { empty: "No interface with an address." }),
+    el("p", { class: "muted" }, "The server takes calls on every IPv4 address; ",
+      pill("panel", "ok"), " marks those the control panel answers on (port ", o.panel.port, "). Change that under ",
+      el("a", { href: "#settings" }, "Settings"), "."));
+}
+
 PAGES.dashboard = async (main) => {
   const o = await api("/api/overview");
   const s = o.service;
@@ -349,6 +371,8 @@ PAGES.dashboard = async (main) => {
     el("dt", {}, "Direct TournaMAXX"), el("dd", {}, o.server.tcp_ports?.length
       ? el("code", {}, o.server.tcp_ports.map((p) => `TCP ${p}`).join(", ")) : el("span", { class: "muted" }, "off")),
     el("dt", {}, "Admin (local)"), el("dd", {}, el("code", {}, `127.0.0.1:${o.server.admin_port}`)),
+    el("dt", {}, "Control panel"), el("dd", {}, o.panel.listening.map((a) => el("div", {},
+      el("code", {}, hostPort(a, o.panel.port)), WILD[a] ? el("small", {}, ` — ${WILD[a]}`) : null))),
   ];
 
   const c = o.counts;
@@ -383,6 +407,7 @@ PAGES.dashboard = async (main) => {
       el("div", { class: "card stack" }, el("h2", {}, "Listening"), el("dl", { class: "kv" }, ports),
         el("p", { class: "muted" }, "Change these under ", el("a", { href: "#settings" }, "Settings"), "."))),
     el("div", { class: "tiles" }, tiles),
+    interfacesCard(o),
     el("div", { class: "grid cols-2" },
       el("div", { class: "card" }, el("h2", {}, "Cabinets"),
         table(["Serial", "Location", "Release", "Last call", { label: "Outbox", num: true }], cabRows,
@@ -1165,8 +1190,71 @@ PAGES.settings = async (main) => {
     el("p", { class: "muted" }, "The server's whole state file, as docs/tournamaxx.md describes it. Cabinet-reported raw bytes are included."));
 
   fill(main, header("Settings", `Data in ${s.data_dir}`),
-    el("div", { class: "grid cols-2" }, srv, pw), await usersCard(), bk, raw);
+    el("div", { class: "grid cols-2" }, srv, pw),
+    el("div", { class: "grid cols-2" }, panelAccessCard(s.panel), await usersCard()), bk, raw);
 };
+
+// Where the control panel listens: 127.0.0.1, every address, or chosen ones.
+function panelAccessCard(p) {
+  const form = el("form", { class: "card stack" });
+  const candidates = p.interfaces.flatMap((i) => i.addresses.filter((a) => !isLinkLocal(a)).map((a) => ({ a, name: i.name })));
+  const known = new Set(candidates.map((c) => c.a));
+  const only = (a) => p.listen.length === 1 && p.listen[0] === a;
+  const start = only("127.0.0.1") ? "local" : only("0.0.0.0") ? "all" : "chosen";
+  const radio = (value, label, hint) => el("label", { class: "check" },
+    el("input", { type: "radio", name: "mode", value, checked: start === value }), label,
+    hint ? el("small", { class: "muted" }, hint) : null);
+  const boxes = candidates.map((c) => el("input", { type: "checkbox", value: c.a, checked: start === "chosen" && p.listen.includes(c.a) }));
+  const other = input("other", start === "chosen" ? p.listen.filter((a) => !known.has(a)).join(", ") : "",
+    { placeholder: ":: for every IPv6 address, or one not listed" });
+  const chosen = el("div", { class: "stack" },
+    el("div", { class: "stack" }, candidates.map((c, n) => el("label", { class: "check" }, boxes[n], el("code", {}, c.a),
+      c.name ? el("small", { class: "muted" }, c.name) : null))),
+    field("Other addresses", other));
+  const warn = el("div", { class: "note warn" }, "Anyone who can reach these addresses gets the login page. ",
+    "On the internet, put the panel behind HTTPS instead (see deploy/), and keep it on 127.0.0.1.");
+  const mode = () => form.querySelector("input[name=mode]:checked")?.value;
+  const addrs = () => mode() === "local" ? ["127.0.0.1"] : mode() === "all" ? ["0.0.0.0"]
+    : [...boxes.filter((b) => b.checked).map((b) => b.value), ...other.value.split(/[\s,]+/).filter(Boolean)];
+  const sync = () => {
+    chosen.hidden = mode() !== "chosen";
+    warn.hidden = addrs().every(isLoopback);
+  };
+  form.onchange = sync;
+  other.oninput = sync;
+
+  fill(form,
+    el("h2", {}, "Panel access"),
+    el("p", {}, "Listening now on ", p.listening.map((a, n) => [n ? ", " : "", el("code", {}, hostPort(a, p.port))]),
+      el("small", { class: "muted" }, ` — you came in through ${p.via}`)),
+    el("div", { class: "stack" },
+      radio("local", "This computer only", "127.0.0.1"),
+      radio("all", "All interfaces", "0.0.0.0, every IPv4 address"),
+      radio("chosen", "Chosen addresses")),
+    chosen,
+    p.docker ? el("div", { class: "note" }, "In Docker, keep All interfaces: the published port reaches the container's network, not its 127.0.0.1.") : null,
+    warn,
+    el("div", { class: "row" }, el("button", { class: "primary", type: "submit" }, "Save")));
+  sync();
+
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const listen = addrs();
+    let r = await guard(() => api("/api/panel/listen", { body: { listen } }));
+    if (r.confirm) {
+      if (!(await confirmBox("Stop answering here?", r.confirm, "Change it"))) return;
+      r = await guard(() => api("/api/panel/listen", { body: { listen, force: true } }));
+    }
+    const where = r.panel.listening.map((a, n) => [n ? ", " : "", el("code", {}, hostPort(a, r.panel.port))]);
+    if (r.cut) {
+      fill(form, el("h2", {}, "Panel access"), el("div", { class: "note warn" }, "Saved. The panel listens on ", where, " now: open it there."));
+      return;
+    }
+    toast("Saved; the panel listens on the new addresses now");
+    form.replaceWith(panelAccessCard(r.panel));
+  };
+  return form;
+}
 
 // Everyone here can do everything: users are only separate logins.
 async function usersCard() {

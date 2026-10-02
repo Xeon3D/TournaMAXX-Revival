@@ -2,6 +2,7 @@ __pycache__/
 /build/
 /dist/
 *.log
+server-stderr.txt
 modem-server-state*.json
 files/
 outgoing/

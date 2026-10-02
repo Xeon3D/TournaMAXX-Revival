@@ -75,6 +75,12 @@ for one during its first 15 minutes; `--set-password NAME` makes one from
 the command line instead). More users: **Settings > Users**. The config
 (made on first run) sets the ports; see the top of `panel/panel.py`.
 
+The panel listens on 127.0.0.1 only until **Settings > Panel access** says
+otherwise: all interfaces, or addresses chosen from this machine's
+interfaces (the Dashboard lists them). The change applies at once. At
+start, an address that is gone is skipped, and with none left the panel
+falls back to 127.0.0.1.
+
 ## Docker
 
 The server and the panel in one image, for amd64 and arm64:
