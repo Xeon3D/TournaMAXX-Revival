@@ -93,6 +93,15 @@ UDP) set the ports; after that, change them in the panel and publish the
 same ports. Put the panel behind HTTPS before exposing it; behind a proxy
 that sends `X-Forwarded-Proto` its cookie is marked Secure by itself.
 
+Wrong passwords are throttled (5 per user name and address, 20 per address,
+then five minutes). The panel takes the browser's address from a proxy's
+`X-Real-IP` only when the proxy connects from loopback (nginx on the same
+host, as in `deploy/nginx-tournamaxx.conf`) or from an address or network
+in the config's `"trusted_proxies"` (Docker: `TMX_TRUSTED_PROXIES`, e.g.
+`172.16.0.0/12` for a proxy in another container on the same host); an
+`X-Real-IP` from anywhere else is ignored, and its sender's address printed
+in the panel's log once.
+
 On ZimaOS, or any Docker host behind Nginx Proxy Manager: see
 [docs/zimaos.md](docs/zimaos.md) and
 [deploy/docker-compose.yml](deploy/docker-compose.yml).

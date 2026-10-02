@@ -24,4 +24,5 @@ services:
       # - "17751:17751"      # us.accessmerit.com resolves to this host
     environment:
       TMX_SWITCH_PORT: "8086"
+      # TMX_TRUSTED_PROXIES: "172.16.0.0/12"  # where Nginx Proxy Manager connects from (docs/zimaos.md)
       # TMX_ADMIN_PASSWORD: "..."  # instead of making the first user in the browser

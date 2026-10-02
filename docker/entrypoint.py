@@ -12,6 +12,9 @@ then run the panel, which runs the server.
     TMX_SWITCH_PORT      the Mega-Link switch's UDP port (default 8086; 0 for none;
                          also set in a config made before the switch existed)
     TMX_SECURE_COOKIES   "true" when the panel is behind HTTPS
+    TMX_TRUSTED_PROXIES  the proxy's address or network, e.g. "172.16.0.0/12"
+                         (comma-separated), whose X-Real-IP header the login
+                         throttle believes; read at every start when set
 
 The ports are only read on the first start; later they are changed in the
 panel (Settings), which keeps them in /data/panel.json.
@@ -43,8 +46,15 @@ def main():
         print("made %s" % CONFIG, flush=True)
     with open(CONFIG, encoding="utf-8") as f:
         cfg = json.load(f)
+    changed = False
     if "switch_port" not in cfg.setdefault("server", {}):
         cfg["server"]["switch_port"] = int(os.environ.get("TMX_SWITCH_PORT", "8086") or 0)
+        changed = True
+    if "TMX_TRUSTED_PROXIES" in os.environ:
+        proxies = os.environ["TMX_TRUSTED_PROXIES"].replace(",", " ").split()
+        changed = changed or cfg.get("trusted_proxies") != proxies
+        cfg["trusted_proxies"] = proxies
+    if changed:
         with open(CONFIG, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=1)
     users = cfg.get("users")

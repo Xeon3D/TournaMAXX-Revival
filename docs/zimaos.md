@@ -46,9 +46,29 @@ the first start, and log in as `admin`.) More users: **Settings > Users**.
 
 The panel then lives at `https://tournamaxx.example.com/`, and the public
 Mega-Link page at `https://tournamaxx.example.com/megalink` once it is
-switched on (panel: **Mega-Link > Public page**). NPM sends `X-Real-IP` and
-`X-Forwarded-Proto`, which the panel uses for its login throttling and to
-mark its cookie Secure.
+switched on (panel: **Mega-Link > Public page**). NPM sends
+`X-Forwarded-Proto`, which makes the panel mark its cookie Secure, and
+`X-Real-IP`, the browser's address, which the panel's login throttling
+(5 wrong passwords per user name and address, 20 per address, then a
+five-minute wait) goes by.
+
+The panel only believes `X-Real-IP` from a proxy it trusts, or anyone could
+send a new address with each password guess. Tell it where NPM connects
+from with `TMX_TRUSTED_PROXIES` in the compose file (comma-separated
+addresses or networks; it is read at every start), and recreate the
+container:
+
+- NPM on the same ZimaOS box reaches the panel through Docker, from a
+  Docker network address (NPM's container, or the network's gateway, such
+  as `172.17.0.1`). `172.16.0.0/12` covers Docker's usual networks;
+- NPM on another machine: that machine's LAN address, e.g. `192.168.1.10`.
+
+To see the exact address, log in once through NPM and look at the
+container's log (`docker logs tournamaxx`, or the app's logs in ZimaOS): it
+says `X-Real-IP from 172.18.0.5 ignored: not a trusted proxy`. Trust only
+the proxy, not your whole LAN: any machine in a trusted range can send
+`X-Real-IP`. Without `TMX_TRUSTED_PROXIES` the panel still works, but
+counts every login through NPM as coming from NPM's address.
 
 ### Keeping the panel private, the Mega-Link page public (optional)
 

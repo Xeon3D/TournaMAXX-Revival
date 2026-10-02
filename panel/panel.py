@@ -23,12 +23,23 @@ The config (made with defaults if missing):
                 "switch_port": 0},         the Mega-Link switch's UDP port (0: off)
      "secure_cookies": false,              true: always Secure (also when a proxy
                                            sends X-Forwarded-Proto: https)
+     "trusted_proxies": [],                more proxies whose X-Real-IP is believed,
+                                           e.g. ["172.16.0.0/12"] (optional)
      "users": {"admin": "pbkdf2_sha256$..."}}
 
 In systemd mode the server's options go to <data_dir>/server.env, which
 the unit reads, and the panel runs "sudo -n systemctl start|stop|restart
 <unit>" (deploy/ sets up the sudo rule).  Put it behind a TLS proxy
 (deploy/nginx-tournamaxx.conf) rather than on the open internet.
+
+Failed logins are throttled per address: 5 for one user name, 20 in all,
+then five minutes' wait.  Behind a proxy every connection comes from the
+proxy, so the panel takes the browser's address from the proxy's X-Real-IP
+header -- but only when the connection comes from a trusted proxy: loopback
+(nginx on the same host), and the addresses or networks (CIDR) listed in
+"trusted_proxies", such as the address Nginx Proxy Manager connects from
+when the panel runs in Docker (an X-Real-IP from anywhere else is ignored,
+and the panel prints the sender's address once, to find it by).
 """
 
 import argparse
@@ -39,6 +50,7 @@ import hmac
 import http.server
 import importlib.util
 import io
+import ipaddress
 import json
 import mimetypes
 import os
@@ -190,17 +202,88 @@ def check_new_user(name, password):
         raise ValueError("use at least 10 characters")
 
 
-def throttled(addr):
-    with AUTH_LOCK:
-        c = FAILS.get(addr)
-        return c is not None and c[0] >= 5 and c[1] > now()
+# Failed logins, counted for five minutes after the last one: 5 for one user
+# name from one address, so that people behind one address (a shared proxy,
+# a NAT) do not lock each other out; and 20 from one address over all names.
+FAIL_WINDOW = 300
+FAIL_LIMITS = (("user", 5), ("addr", 20))
 
 
-def failed(addr):
+def fail_keys(addr, user):
+    return {"user": ("user", addr, str(user)[:64]), "addr": ("addr", addr)}
+
+
+def throttled(addr, user):
+    keys = fail_keys(addr, user)
     with AUTH_LOCK:
-        c = FAILS.setdefault(addr, [0, 0])
-        c[0] = c[0] + 1 if c[1] > now() or c[0] < 5 else 1
-        c[1] = now() + 300
+        for kind, limit in FAIL_LIMITS:
+            c = FAILS.get(keys[kind])
+            if c is not None and c[0] >= limit and c[1] > now():
+                return True
+    return False
+
+
+def failed(addr, user):
+    with AUTH_LOCK:
+        t = now()
+        for k in [k for k, c in FAILS.items() if c[1] <= t]:
+            del FAILS[k]
+        for k in fail_keys(addr, user).values():
+            c = FAILS.setdefault(k, [0, 0])
+            c[0] += 1
+            c[1] = t + FAIL_WINDOW
+
+
+def logged_in(addr, user):
+    with AUTH_LOCK:
+        FAILS.pop(fail_keys(addr, user)["user"], None)
+
+
+# ------------------------------------------------------------------ proxies
+
+LOOPBACK = ("127.0.0.0/8", "::1")
+PROXY_WARNED = set()
+
+
+def trusted_proxies():
+    """Loopback (nginx on the same host, deploy/nginx-tournamaxx.conf) and the
+    config's "trusted_proxies": addresses or networks, a list or a string."""
+    v = CFG.get("trusted_proxies") or []
+    if isinstance(v, str):
+        v = v.replace(",", " ").split()
+    nets = []
+    for a in list(LOOPBACK) + list(v):
+        try:
+            nets.append(ipaddress.ip_network(str(a).strip().strip("[]"), strict=False))
+        except ValueError:
+            raise ValueError("not an address or network: %s" % a)
+    return nets
+
+
+def ip(addr):
+    """addr as an ip_address (an IPv4-mapped IPv6 one as IPv4), or None."""
+    try:
+        a = ipaddress.ip_address(str(addr).strip().strip("[]").split("%")[0])
+    except ValueError:
+        return None
+    return (a.ipv4_mapped or a) if a.version == 6 else a
+
+
+def real_address(peer, header):
+    """The browser's address: the proxy's X-Real-IP header when the connection
+    comes from a trusted proxy, otherwise the connection's own address (anyone
+    else could send any X-Real-IP, a new one at each login attempt)."""
+    p = ip(peer)
+    if not header or p is None:
+        return str(p or peer)
+    if not any(p.version == n.version and p in n for n in trusted_proxies()):
+        if peer not in PROXY_WARNED and len(PROXY_WARNED) < 100:
+            PROXY_WARNED.add(peer)
+            print("X-Real-IP from %s ignored: not a trusted proxy (see trusted_proxies "
+                  "in panel.py)" % peer, flush=True)
+        return str(p)
+    r = ip(header)
+    return str(r) if r is not None else str(p)
 
 
 # ------------------------------------------------------------------ the server
@@ -848,7 +931,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- plumbing
     def client(self):
-        return self.headers.get("X-Real-IP") or self.client_address[0]
+        return real_address(self.client_address[0], self.headers.get("X-Real-IP"))
 
     def cookie(self, name):
         for part in (self.headers.get("Cookie") or "").split(";"):
@@ -952,16 +1035,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -------------------------------------------------------------- login
     def login(self):
         addr = self.client()
-        if throttled(addr):
-            return self.send(429, {"error": "too many attempts: wait five minutes"})
         req = self.json_body()
-        stored = CFG["users"].get(req.get("user", ""))
+        user = req.get("user", "")
+        if throttled(addr, user):
+            return self.send(429, {"error": "too many attempts: wait five minutes"})
+        stored = CFG["users"].get(user) if isinstance(user, str) else None
         if not stored or not check_password(req.get("password", ""), stored):
-            failed(addr)
+            failed(addr, user)
             time.sleep(1)
             return self.send(401, {"error": "wrong user name or password"})
-        FAILS.pop(addr, None)
-        self.start_session(req["user"])
+        logged_in(addr, user)
+        self.start_session(user)
 
     def start_session(self, user):
         tok = new_session(user)
@@ -1236,6 +1320,10 @@ def main():
         save_config()
         print("password set for %s" % a.set_password)
         return
+    try:
+        trusted_proxies()
+    except ValueError as e:          # a bad "trusted_proxies" in the config
+        sys.exit("trusted_proxies: %s" % e)
     STARTED[0] = now()
     if not CFG["users"]:
         print("no users yet: open the panel within %d minutes to make the first one "
